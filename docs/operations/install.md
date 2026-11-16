@@ -234,7 +234,7 @@ Port checks target new installations and normally fail against an already runnin
 deployment. Preflight does not verify a new external SSH connection or public reachability.
 
 The app build runs locked `npm ci` and the UI build in pinned Node 22.23.1, then
-Go 1.27.3 with `-tags=release` to embed real UI assets. All Go roles use the same
+Go 1.27.4 with `-tags=release` to embed real UI assets. All Go roles use the same
 image. Sensor inputs pin Cowrie 3.1.2, OpenCanary 0.9.10, and their extensions.
 Operational settings live in `deploy` without changing engine fixtures.
 Cowrie's emulated command registry excludes download, DNS, and network commands.
