@@ -222,6 +222,31 @@ elif a[0] == 'rm':
                 process.communicate()
 
 
+class MergeQueuePolicyTests(unittest.TestCase):
+    def test_default_branch_requires_queue_and_every_full_suite_check_without_bypass(self):
+        path = ROOT / '.github/merge-queue.ruleset.json'
+        policy = json.loads(path.read_text()) if path.is_file() else {}
+        self.assertEqual(policy.get('enforcement'), 'active')
+        self.assertEqual(policy['target'], 'branch')
+        self.assertEqual(policy['conditions'], {'ref_name': {'include': ['~DEFAULT_BRANCH'], 'exclude': []}})
+        self.assertEqual(policy['bypass_actors'], [])
+        rules = {rule['type']: rule for rule in policy['rules']}
+        self.assertEqual(len(rules), len(policy['rules']))
+        self.assertTrue({'pull_request', 'merge_queue', 'required_status_checks',
+                         'deletion', 'non_fast_forward'} <= rules.keys())
+        queue = rules['merge_queue']['parameters']
+        self.assertEqual(queue['grouping_strategy'], 'ALLGREEN')
+        self.assertEqual(queue['max_entries_to_build'], 1)
+        self.assertEqual(queue['max_entries_to_merge'], 1)
+        self.assertEqual(queue['min_entries_to_merge'], 1)
+        self.assertEqual(queue['min_entries_to_merge_wait_minutes'], 0)
+        self.assertEqual(queue['check_response_timeout_minutes'], 45)
+        required = rules['required_status_checks']['parameters']['required_status_checks']
+        self.assertEqual({(check['context'], check['integration_id']) for check in required},
+                         {('Secret scan', 15368), ('Dependency vulnerabilities', 15368), ('automated', 15368)})
+        self.assertEqual(len(required), 3)
+
+
 class QemuWorkflowTests(unittest.TestCase):
     def test_merge_queue_runs_the_full_automatic_suite_without_cancellation(self):
         workflow = (ROOT/'.github/workflows/ci.yml').read_text()

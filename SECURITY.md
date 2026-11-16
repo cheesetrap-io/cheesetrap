@@ -8,8 +8,8 @@ digest does not establish that an image has no vulnerabilities.
 
 ## Report a vulnerability
 
-Use [GitHub Private vulnerability reporting](https://github.com/razberrytaki/cheesetrap/security/advisories/new)
-for [razberrytaki/cheesetrap](https://github.com/razberrytaki/cheesetrap).
+Use [GitHub Private vulnerability reporting](https://github.com/cheesetrap-io/cheesetrap/security/advisories/new)
+for [cheesetrap-io/cheesetrap](https://github.com/cheesetrap-io/cheesetrap).
 If the form is unavailable, open an issue asking for a reporting route without
 vulnerability details. No separate public security email address is designated.
 Do not reproduce attacks against a production server.

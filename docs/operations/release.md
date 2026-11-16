@@ -18,10 +18,21 @@ Automatic push runs apply only to master. PR and manual runs remain available.
 Only a newer run with the same workflow, event, and PR number cancels an older run.
 Master-push, merge-queue and manual runs use per-run groups and do not cancel each other.
 Every event runs the same full suite, including image builds and engine tests.
-The `merge_group` trigger prepares CI for a queue; it does not enable or enforce
-one. GitHub's native merge queue requires an organization-owned repository. Until
-the repository is eligible and a queue is required for master, keep full PR
-coverage. Do not replace it with affected-only checks.
+The organization-owned repository requires GitHub's native merge queue for the
+default branch, master. The desired policy is recorded in
+[`merge-queue.ruleset.json`](../../.github/merge-queue.ruleset.json): no bypass
+actors, all three checks from GitHub Actions, one candidate at a time, and
+`ALLGREEN` grouping. The queue checks the latest combined candidate before merge.
+PR checks do not additionally require rebasing onto every new master commit.
+The queue's 45-minute response deadline does not widen any test or job timeout.
+Full PR coverage remains enabled until a separately verified change introduces
+affected checks.
+
+The JSON file records configuration; editing it alone does not update GitHub.
+Verify the active [repository rulesets](https://github.com/cheesetrap-io/cheesetrap/rules)
+and a real `merge_group` run. A PR's checks passing does not prove that its queued
+candidate has passed. Required checks are `Secret scan`, `Dependency vulnerabilities`,
+and `automated`, with no skipped required work accepted by the workflow.
 
 `scripts/test-acceptance.py` owns SQL, OpenAPI, UI type generation, contract and
 generated-diff checks, and the UI build. CI's `Check current automated result`
@@ -40,7 +51,7 @@ FoxIO conditions also apply to source installations.
 At the selected public commit, require successful `Secret scan`,
 `Dependency vulnerabilities`, and `automated` jobs. Follow the
 [local scan and exception policy](../../CONTRIBUTING.md#keep-evidence-and-secrets-private).
-The target is [razberrytaki/cheesetrap](https://github.com/razberrytaki/cheesetrap).
+The target is [cheesetrap-io/cheesetrap](https://github.com/cheesetrap-io/cheesetrap).
 Dependency review and full candidate acceptance remain separate release gates.
 
 `Dependency vulnerabilities` audits the npm lock graph without lifecycle scripts
@@ -67,7 +78,7 @@ operational images without digests are prohibited.
 
 Do not copy generated output or `node_modules` from another checkout. Set the
 revision to the actual selected commit. Set `SOURCE_REPOSITORY` to an accessible
-source repository, such as `https://github.com/razberrytaki/cheesetrap.git` or a local
+source repository, such as `https://github.com/cheesetrap-io/cheesetrap.git` or a local
 repository path. This procedure never pushes.
 
 ```sh
