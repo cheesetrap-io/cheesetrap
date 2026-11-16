@@ -5,8 +5,10 @@ Supported arguments: relative Go packages, -run REGEXP, -skip REGEXP, -timeout D
 -v, -race. Go flags controlling execution/configuration cannot bypass the harness.
 A successful run must pass an integration-tagged test discovered from the selected
 packages. Package-only skip events mean no test files; real test skips fail.
-An unfiltered ./... run uses three fresh stacks, keeping the same resource caps.
+An unfiltered ./... run uses three fresh stacks, at most two at a time, with the
+same per-stack resource caps.
 """
+import asyncio
 import functools
 import json
 import os
@@ -125,6 +127,11 @@ def validate_environment(environment):
     if environment.get("DOCKER_HOST") or environment.get("DOCKER_CONTEXT"):
         raise ValueError("Docker target overrides must be unset; select a local context first")
 
+
+def timing(phase, started):
+    print("INTEGRATION_TIMING " + json.dumps({"phase": phase, "elapsed_ms": int((time.monotonic() - started) * 1000)}), flush=True)
+
+
 def full_suite_batches(packages, flags):
     """Separate persistent fixtures and the hard-memory regression, not tests."""
     return [
@@ -135,6 +142,50 @@ def full_suite_batches(packages, flags):
         # before Go's package alarm; caller-supplied timeouts still take priority.
         (["./internal/reporting"], ["-timeout", "5m"] + flags + ["-run", "^TestSecurityAggregateMemory$"]),
     ]
+
+
+def run_batches(batches, env):
+    """Overlap at most two fresh stacks; join every result and owned cleanup."""
+    if not batches:
+        raise ValueError('no integration batches selected')
+
+    async def execute():
+        slots = asyncio.Semaphore(2)
+
+        async def batch(index, selection):
+            async with slots:
+                packages, flags = selection
+                print(f"Full integration batch {index}/3 (fresh bounded PostgreSQL)", flush=True)
+                # A private file avoids pipe backpressure and output interleaving.
+                with tempfile.TemporaryFile(mode='w+') as output:
+                    child = subprocess.Popen(
+                        [sys.executable, '-B', str(ROOT / 'scripts/test-integration.py'), *packages, *flags],
+                        cwd=ROOT, env=env, stdin=subprocess.DEVNULL, stdout=output,
+                        stderr=subprocess.STDOUT, start_new_session=True)
+                    try:
+                        code = await asyncio.to_thread(child.wait)
+                    finally:
+                        if child.poll() is None:
+                            # The child's TERM handler stops its Go command and
+                            # releases its own DB lease. Match acceptance's
+                            # existing 90-second owned-cleanup budget.
+                            try: os.killpg(child.pid, signal.SIGTERM)
+                            except ProcessLookupError: pass
+                            try: await asyncio.to_thread(child.wait, timeout=90)
+                            except subprocess.TimeoutExpired:
+                                try: os.killpg(child.pid, signal.SIGKILL)
+                                except ProcessLookupError: pass
+                                await asyncio.to_thread(child.wait)
+                    output.seek(0)
+                    return code, output.read()
+
+        # Nonzero exits are data, not exceptions: every selected batch still runs.
+        return await asyncio.gather(*(batch(i, selection) for i, selection in enumerate(batches, 1)))
+
+    results = asyncio.run(execute())
+    # Preserve the original batch order for evidence and phase timings.
+    for _, output in results: print(output, end='', flush=True)
+    return int(any(code != 0 for code, _ in results))
 
 
 class OwnedPostgres:
@@ -228,12 +279,8 @@ def main(e2e=False, selection=None):
     if not e2e and packages == ["./..."] and not any(f in flags for f in ("-run", "-skip")):
         _, listed = run_command(["go", "list", "-f", "{{.Dir}}", "./..."], childenv=env)
         all_packages = ["./" + str(Path(p).relative_to(ROOT)) for p in listed.splitlines()]
-        for index, batch in enumerate(full_suite_batches(all_packages, flags), 1):
-            print(f"Full integration batch {index}/3 (fresh bounded PostgreSQL)", flush=True)
-            # Each invocation owns and cleans its own stack even on failure or
-            # cancellation. No operational target or credential crosses batches.
-            if main(selection=batch):
-                return 1
+        if run_batches(full_suite_batches(all_packages, flags), env):
+            return 1
         print("PASS: full integration suite across 3 isolated batches", flush=True)
         return 0
     if e2e:
@@ -274,7 +321,10 @@ def main(e2e=False, selection=None):
     primary_failure = False
     print("Starting isolated PostgreSQL integration project " + project + " (Testcontainers)", flush=True)
     try:
+        started = time.monotonic()
         container, port = owner.start()
+        timing("postgres", started)
+        started = time.monotonic()
         bootstrap_env = dict(env, PGPASSWORD=bootstrap)
         test_env = dict(env, CHEESETRAP_TEST_CONTAINER=container)
         options = ["--env", "PGPASSWORD"]
@@ -299,6 +349,8 @@ def main(e2e=False, selection=None):
             childenv=bootstrap_env, data=(ROOT / "deploy/test-bootstrap.sql").read_text())
         _, version = run(docker + ["exec", "--env", "PGPASSWORD", container, "psql", "-X", "-At", "-h", "127.0.0.1", "-U", "postgres", "-d", "cheesetrap_test", "-c", "SHOW server_version"], childenv=bootstrap_env)
         print("PostgreSQL " + version.strip(), flush=True)
+        timing("bootstrap", started)
+        started = time.monotonic()
         migration_env = dict(env, CHEESETRAP_DATABASE_URL=test_env["CHEESETRAP_TEST_MIGRATION_URL"])
         run(["go", "run", "./cmd/cheesetrap", "migrate"], childenv=migration_env, timeout=180)
         install_env = dict(env, CHEESETRAP_DATABASE_URL=test_env["CHEESETRAP_TEST_INSTALL_MIGRATION_URL"])
@@ -309,13 +361,16 @@ def main(e2e=False, selection=None):
         run(["go", "run", "./cmd/cheesetrap", "migrate"], childenv=enrichment_env, timeout=180)
         for domain in ("PROOF", "MEMORY", "POLICY", "POLICY_API", "EVENTRESULT", "RESTORE", "CAPACITY", "RETENTION", "REPORTING", "JOBS", "REVISION", "DRAFT_RUNTIME", "REVIEW", "RULECONFIG", "REVIEW_FLOW", "AUTOMATIC_API", "APPROVAL"):
             run(["go", "run", "./cmd/cheesetrap", "migrate"], childenv=dict(env, CHEESETRAP_DATABASE_URL=test_env[f"CHEESETRAP_TEST_{domain}_MIGRATION_URL"]), timeout=180)
+        timing("migrations", started)
         print("Prepared migrated test/acceptance/detection/enrichment/reporting/jobs/revision/draft-runtime databases and separate empty migration-test database", flush=True)
         if e2e:
             test_env["CHEESETRAP_E2E_RUN"] = "1"
         # One bounded PostgreSQL serves every domain. Do not multiply its
         # working sets by the host's CPU count through parallel Go packages.
+        started = time.monotonic()
         code, output = run(["go", "test", "-p=1", "-tags=" + ("integration,release" if e2e else "integration"), "-count=1", "-json", "-timeout=3m"] + flags + packages,
                            childenv=test_env, check=False, timeout=660)
+        timing("tests", started)
         for secret in secret_values:
             output = output.replace(secret, "[REDACTED]")
         logs = ROOT / (".local/restore" if "TestRestoreDrafts" in " ".join(flags) else ".local/e2e" if e2e or "TestReviewFlow" in " ".join(flags) else ".local/integration")
@@ -335,6 +390,7 @@ def main(e2e=False, selection=None):
         # Release only the owned Testcontainers lease, including on cancellation.
         for sig in (signal.SIGINT, signal.SIGTERM):
             signal.signal(sig, signal.SIG_IGN)
+        started = time.monotonic()
         try:
             owner.close()
         except Exception:
@@ -345,6 +401,8 @@ def main(e2e=False, selection=None):
             print("owned integration project cleanup failed", file=sys.stderr, flush=True)
         else:
             print("Cleaned isolated project " + project, flush=True)
+        finally:
+            timing("cleanup", started)
     return result
 
 

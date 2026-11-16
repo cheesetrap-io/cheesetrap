@@ -11,12 +11,28 @@ deploy to production, or send reports.
 
 | File and display name | Role |
 | --- | --- |
-| `ci.yml`, `CI - checks (auto/manual)` | Automatic master pushes and PR checks and manual checks on GitHub-hosted `ubuntu-24.04` runners. Run names include event and branch. |
+| `ci.yml`, `CI - checks (auto/manual)` | Automatic master pushes, PR and merge-queue checks, and manual checks on GitHub-hosted `ubuntu-24.04` runners. Run names include event and branch. |
 | `arm64-image.yml`, `ARM64 image (manual)` | Manual only. Builds the ARM64 runtime image under QEMU on a GitHub-hosted x86_64 runner and runs the CLI smoke. A passing `ci.yml` run does not include this check. |
 
 Automatic push runs apply only to master. PR and manual runs remain available.
 Only a newer run with the same workflow, event, and PR number cancels an older run.
-Master-push and manual runs use per-run groups and do not cancel each other.
+Master-push, merge-queue and manual runs use per-run groups and do not cancel each other.
+Every event runs the same full suite, including image builds and engine tests.
+The organization-owned repository requires GitHub's native merge queue for the
+default branch, master. The desired policy is recorded in
+[`merge-queue.ruleset.json`](../../.github/merge-queue.ruleset.json): no bypass
+actors, all three checks from GitHub Actions, one candidate at a time, and
+`ALLGREEN` grouping. The queue checks the latest combined candidate before merge.
+PR checks do not additionally require rebasing onto every new master commit.
+The queue's 45-minute response deadline does not widen any test or job timeout.
+Full PR coverage remains enabled until a separately verified change introduces
+affected checks.
+
+The JSON file records configuration; editing it alone does not update GitHub.
+Verify the active [repository rulesets](https://github.com/cheesetrap-io/cheesetrap/rules)
+and a real `merge_group` run. A PR's checks passing does not prove that its queued
+candidate has passed. Required checks are `Secret scan`, `Dependency vulnerabilities`,
+and `automated`, with no skipped required work accepted by the workflow.
 
 `scripts/test-acceptance.py` owns SQL, OpenAPI, UI type generation, contract and
 generated-diff checks, and the UI build. CI's `Check current automated result`
@@ -35,7 +51,7 @@ FoxIO conditions also apply to source installations.
 At the selected public commit, require successful `Secret scan`,
 `Dependency vulnerabilities`, and `automated` jobs. Follow the
 [local scan and exception policy](../../CONTRIBUTING.md#keep-evidence-and-secrets-private).
-The target is [razberrytaki/cheesetrap](https://github.com/razberrytaki/cheesetrap).
+The target is [cheesetrap-io/cheesetrap](https://github.com/cheesetrap-io/cheesetrap).
 Dependency review and full candidate acceptance remain separate release gates.
 
 `Dependency vulnerabilities` audits the npm lock graph without lifecycle scripts
@@ -62,7 +78,7 @@ operational images without digests are prohibited.
 
 Do not copy generated output or `node_modules` from another checkout. Set the
 revision to the actual selected commit. Set `SOURCE_REPOSITORY` to an accessible
-source repository, such as `https://github.com/razberrytaki/cheesetrap.git` or a local
+source repository, such as `https://github.com/cheesetrap-io/cheesetrap.git` or a local
 repository path. This procedure never pushes.
 
 ```sh
@@ -156,7 +172,13 @@ bindings, image, and cleanup. Go unit tests reject bypasses such as empty host
 addresses and IPv6 wildcards. The same CI step tests an unreachable socket to
 verify there is no daemon fallback. Sequential create and cleanup tests start the
 next batch without waiting for the previous Ryuk to exit, proving session separation
-and resource ownership. If startup or test failure coincides with cleanup failure,
+and resource ownership. An overlapping-lease regression also checks that data and
+cleanup in one owned database cannot affect another. Full integration overlaps at
+most two of its three existing batches, preserving each stack's resource caps and
+serial Go package execution. Every selected batch must pass; nonzero exits do not
+cancel the remaining selected tests. Cancellation waits for active batches to
+release their own resources. Public phase timings retain the original batch order.
+If startup or test failure coincides with cleanup failure,
 the original error stays primary and public output adds a fixed sanitized category.
 
 Network policy, engine, or input-boundary changes require fresh acceptance for the
@@ -166,6 +188,12 @@ or a minimum hardware size. Use actual input and the [retention guide](retention
 to plan protected data, report copies, WAL, backup, and restore space.
 
 ## Public diagnostics
+
+Integration and E2E `CI_CHECK` summaries also expose up to 15 phase timings per
+command: PostgreSQL startup, bootstrap, migrations, tests, and cleanup. These
+contain only fixed phase names and bounded integer milliseconds, without database
+URLs, credentials, container identifiers, commands, or runtime output. Timings
+are diagnostic only and never change pass/fail decisions.
 
 Automated acceptance prints `CI_CHECK` status per command and source-defined failed
 test names, files, lines, and fixed categories. It reports process return codes

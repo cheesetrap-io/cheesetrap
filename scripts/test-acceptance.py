@@ -334,6 +334,21 @@ def public_diagnostics(output, sources):
             'categories': sorted(categories)}
 
 
+def public_integration_timings(output):
+    """Project only fixed phase names and bounded integers from private logs."""
+    timings = []
+    for line in output.splitlines():
+        if not line.startswith('INTEGRATION_TIMING '): continue
+        try: row = json.loads(line.removeprefix('INTEGRATION_TIMING '))
+        except ValueError: continue
+        if not isinstance(row, dict) or set(row) != {'phase', 'elapsed_ms'}: continue
+        if row['phase'] not in ('postgres', 'bootstrap', 'migrations', 'tests', 'cleanup'): continue
+        if type(row['elapsed_ms']) is not int or not 0 <= row['elapsed_ms'] <= 1200000: continue
+        timings.append(row)
+        if len(timings) == 15: break
+    return timings
+
+
 def print_public_summary(commands):
     tracked = subprocess.check_output(['git', 'ls-files', '-z'], cwd=ROOT).decode().split('\0')
     sources = {name: (ROOT / name).read_text() for name in tracked
@@ -345,6 +360,9 @@ def print_public_summary(commands):
         name = command['name']
         if name not in allowed: continue
         row = {'command': name, 'status': 'PASS' if command['status'] == 'PASS' else 'FAIL'}
+        if name in ('integration', 'e2e') and command.get('log'):
+            timings = public_integration_timings((ROOT / command['log']).read_text(errors='replace'))
+            if timings: row['timings'] = timings
         if name == 'ui':
             _, diagnostics = ui_check(ROOT / command['report'], command.get('returncode'), sources,
                                       command.get('process_status', 'exited'))

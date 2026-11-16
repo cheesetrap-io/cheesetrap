@@ -12,6 +12,8 @@ import unittest
 from unittest import mock
 import contextlib
 import io
+import socket
+import threading
 
 SPEC = importlib.util.spec_from_file_location("integration_runner", Path(__file__).with_name("test-integration.py"))
 RUNNER = importlib.util.module_from_spec(SPEC)
@@ -20,6 +22,156 @@ SPEC.loader.exec_module(RUNNER)
 
 def output(*events):
     return "\n".join(json.dumps(event) for event in events)
+
+
+class BatchExecutionTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        (self.root / 'scripts').mkdir()
+        (self.root / 'scripts/test-integration.py').write_text('''import json, os, pathlib, signal, socket, sys
+root = pathlib.Path(__file__).resolve().parents[1]
+name = sys.argv[1]
+def record(action):
+ with (root/'events').open('a') as stream:
+  stream.write(json.dumps([action, name, sys.argv[2:]])+'\\n')
+record('start')
+if os.environ.get('PROBE_BLOCK'):
+ def stop(signum, frame): raise SystemExit(128+signum)
+ signal.signal(signal.SIGTERM, stop)
+ signal.signal(signal.SIGINT, stop)
+ (root/('ready-'+name.removeprefix('./'))).write_text(str(os.getpid()))
+ try:
+  with socket.socket(socket.AF_UNIX) as connection:
+   connection.connect(str(root/'gate'))
+   connection.sendall(name.encode())
+   signal.pause()
+ finally: (root/('clean-'+name.removeprefix('./'))).touch()
+else:
+ with socket.socket(socket.AF_UNIX) as connection:
+  connection.settimeout(1)
+  connection.connect(str(root/'gate'))
+  connection.sendall(name.encode())
+  try: released = connection.recv(10)
+  except TimeoutError: sys.exit(17)
+  if released != b'run': sys.exit(18)
+ record('end')
+ print('completed '+name, flush=True)
+ if name == os.environ.get('PROBE_FAIL'): sys.exit(9)
+''')
+        self.batches = [([f'./{name}'], ['-run', '^TestFixture$']) for name in ('one', 'two', 'three')]
+        self.env = {k: os.environ[k] for k in ('PATH', 'HOME') if k in os.environ}
+
+    def exercise(self, failure=None):
+        server = socket.socket(socket.AF_UNIX)
+        server.bind(str(self.root / 'gate'))
+        server.listen()
+        server.settimeout(5)
+        errors = []
+        def release():
+            connections = []
+            try:
+                # The first worker cannot finish until a second starts. A
+                # sequential implementation fails its assertion, not a stopwatch.
+                for _ in range(2):
+                    connection, _ = server.accept()
+                    connections.append(connection)
+                    connection.recv(100)
+                for connection in connections: connection.sendall(b'run')
+                connection, _ = server.accept()
+                connections.append(connection)
+                connection.recv(100)
+                connection.sendall(b'run')
+            except (OSError, TimeoutError) as error:
+                errors.append(type(error).__name__)
+            finally:
+                for connection in connections: connection.close()
+                server.close()
+        thread = threading.Thread(target=release)
+        thread.start()
+        captured = io.StringIO()
+        try:
+            with mock.patch.object(RUNNER, 'ROOT', self.root), contextlib.redirect_stdout(captured):
+                code = RUNNER.run_batches(self.batches, dict(self.env, PROBE_FAIL=failure or ''))
+        finally:
+            thread.join(timeout=6)
+        return code, captured.getvalue(), errors
+
+    def test_three_batches_overlap_at_most_two_and_keep_flags_and_output(self):
+        code, captured, errors = self.exercise()
+        self.assertEqual(code, 0, 'independent batches must overlap and all succeed')
+        self.assertEqual(errors, [])
+        active, peak, started = set(), 0, []
+        for action, name, flags in map(json.loads, (self.root / 'events').read_text().splitlines()):
+            self.assertEqual(flags, ['-run', '^TestFixture$'])
+            if action == 'start':
+                self.assertNotIn(name, started)
+                started.append(name)
+                active.add(name)
+                peak = max(peak, len(active))
+            else: active.remove(name)
+        self.assertEqual(peak, 2)
+        self.assertEqual(active, set())
+        self.assertEqual(set(started), {'./one', './two', './three'})
+        self.assertEqual([line for line in captured.splitlines() if line.startswith('completed ')],
+                         ['completed ./one', 'completed ./two', 'completed ./three'])
+
+    def test_failed_batch_stays_red_and_other_batches_still_execute(self):
+        code, captured, errors = self.exercise('./one')
+        self.assertNotEqual(code, 0)
+        self.assertEqual(errors, [])
+        for name in ('one', 'two', 'three'): self.assertIn('completed ./'+name, captured)
+
+    def test_empty_batch_selection_fails(self):
+        with self.assertRaisesRegex(ValueError, 'no integration batches'):
+            RUNNER.run_batches([], self.env)
+
+    def test_parent_cancellation_waits_for_both_owned_batch_cleanups(self):
+        probe = self.root / 'probe.py'
+        probe.write_text('''import importlib.util, os, pathlib, signal, sys
+spec=importlib.util.spec_from_file_location('runner',sys.argv[1])
+runner=importlib.util.module_from_spec(spec); spec.loader.exec_module(runner)
+runner.ROOT=pathlib.Path(sys.argv[2])
+for sig in (signal.SIGTERM,signal.SIGINT): signal.signal(sig,runner.interrupted)
+try:
+ sys.exit(runner.run_batches([(['./'+name],[]) for name in ('one','two','three')],dict(os.environ)))
+except runner.IntegrationInterrupted:
+ print('batch manager interrupted',flush=True)
+ sys.exit(1)
+''')
+        with socket.socket(socket.AF_UNIX) as server:
+            server.bind(str(self.root / 'gate'))
+            server.listen()
+            server.settimeout(5)
+            process = subprocess.Popen([sys.executable, '-B', str(probe), RUNNER.__file__, str(self.root)],
+                                       env=dict(self.env, PROBE_BLOCK='1'), stdout=subprocess.PIPE,
+                                       stderr=subprocess.STDOUT, text=True, start_new_session=True)
+            connections = []
+            try:
+                names = set()
+                for _ in range(2):
+                    connection, _ = server.accept()
+                    connections.append(connection)
+                    names.add(connection.recv(100).decode())
+                self.assertEqual(names, {'./one', './two'})
+                process.send_signal(signal.SIGTERM)
+                stdout, _ = process.communicate(timeout=5)
+                self.assertNotEqual(process.returncode, 0)
+                self.assertIn('batch manager interrupted', stdout)
+                for name in ('one', 'two'):
+                    self.assertTrue((self.root / ('clean-'+name)).exists(), 'owned batch cleanup must finish')
+                    with self.assertRaises(ProcessLookupError):
+                        os.kill(int((self.root / ('ready-'+name)).read_text()), 0)
+                self.assertFalse((self.root / 'ready-three').exists(), 'queued batches must not start on cancel')
+            finally:
+                for connection in connections: connection.close()
+                for path in self.root.glob('ready-*'):
+                    try: os.killpg(int(path.read_text()), signal.SIGKILL)
+                    except ProcessLookupError: pass
+                if process.poll() is None:
+                    os.killpg(process.pid, signal.SIGKILL)
+                    process.communicate()
 
 
 class ResultsTests(unittest.TestCase):

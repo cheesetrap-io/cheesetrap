@@ -222,7 +222,44 @@ elif a[0] == 'rm':
                 process.communicate()
 
 
+class MergeQueuePolicyTests(unittest.TestCase):
+    def test_default_branch_requires_queue_and_every_full_suite_check_without_bypass(self):
+        path = ROOT / '.github/merge-queue.ruleset.json'
+        policy = json.loads(path.read_text()) if path.is_file() else {}
+        self.assertEqual(policy.get('enforcement'), 'active')
+        self.assertEqual(policy['target'], 'branch')
+        self.assertEqual(policy['conditions'], {'ref_name': {'include': ['~DEFAULT_BRANCH'], 'exclude': []}})
+        self.assertEqual(policy['bypass_actors'], [])
+        rules = {rule['type']: rule for rule in policy['rules']}
+        self.assertEqual(len(rules), len(policy['rules']))
+        self.assertTrue({'pull_request', 'merge_queue', 'required_status_checks',
+                         'deletion', 'non_fast_forward'} <= rules.keys())
+        queue = rules['merge_queue']['parameters']
+        self.assertEqual(queue['grouping_strategy'], 'ALLGREEN')
+        self.assertEqual(queue['max_entries_to_build'], 1)
+        self.assertEqual(queue['max_entries_to_merge'], 1)
+        self.assertEqual(queue['min_entries_to_merge'], 1)
+        self.assertEqual(queue['min_entries_to_merge_wait_minutes'], 0)
+        self.assertEqual(queue['check_response_timeout_minutes'], 45)
+        required = rules['required_status_checks']['parameters']['required_status_checks']
+        self.assertEqual({(check['context'], check['integration_id']) for check in required},
+                         {('Secret scan', 15368), ('Dependency vulnerabilities', 15368), ('automated', 15368)})
+        self.assertEqual(len(required), 3)
+
+
 class QemuWorkflowTests(unittest.TestCase):
+    def test_merge_queue_runs_the_full_automatic_suite_without_cancellation(self):
+        workflow = (ROOT/'.github/workflows/ci.yml').read_text()
+        triggers = workflow.split('\non:\n', 1)[1].split('\nconcurrency:', 1)[0]
+        self.assertIn('  merge_group:\n    types: [checks_requested]\n', triggers)
+        self.assertNotRegex(triggers, r'paths(?:-ignore)?:')
+        self.assertIn("cancel-in-progress: ${{ github.event_name == 'pull_request' }}", workflow)
+        # Every automatic job runs for merge_group, including image tests. No
+        # event condition may silently make the full-suite queue gate a subset.
+        self.assertNotRegex(workflow, re.compile(r'^    if:', re.M))
+        self.assertIn('scripts/test-acceptance.sh --automated-only', workflow)
+        self.assertIn('scripts/test-python.py image --image cheesetrap-web:ci', workflow)
+
     def test_fixed_ci_policy_keeps_identity_pins_and_disposable_guard(self):
         workflow = (ROOT/'.github/workflows/arm64-image.yml').read_text()
         guard = workflow.index('Require GitHub-hosted Linux x86_64')
