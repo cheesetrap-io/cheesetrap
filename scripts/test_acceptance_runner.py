@@ -19,6 +19,35 @@ runner = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(runner)
 
 class AcceptanceGateTests(unittest.TestCase):
+    def test_integration_summary_exposes_only_bounded_phase_timings(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / '.local').mkdir()
+            rows = [
+                {'phase': 'migrations', 'elapsed_ms': 1500},
+                {'phase': 'tests', 'elapsed_ms': 2300},
+                {'phase': 'private-runtime-canary', 'elapsed_ms': 10},
+                {'phase': 'tests', 'elapsed_ms': True},
+                {'phase': 'tests', 'elapsed_ms': -1},
+                {'phase': 'tests', 'elapsed_ms': 1200001},
+                {'phase': 'tests', 'elapsed_ms': 10, 'private-runtime-canary': 'secret'},
+            ]
+            (root / '.local/integration.log').write_text('\n'.join(
+                'INTEGRATION_TIMING ' + json.dumps(row) for row in rows))
+            captured = io.StringIO()
+            with mock.patch.object(runner, 'ROOT', root), \
+                 mock.patch.object(runner.subprocess, 'check_output', return_value=b''), \
+                 contextlib.redirect_stdout(captured):
+                runner.print_public_summary([{
+                    'name': 'integration', 'status': 'PASS', 'log': '.local/integration.log',
+                }])
+            row = json.loads(captured.getvalue().removeprefix('CI_CHECK '))
+            self.assertEqual(row, {'command': 'integration', 'status': 'PASS', 'timings': rows[:2]})
+            self.assertNotIn('private-runtime-canary', captured.getvalue())
+            self.assertEqual(runner.public_integration_timings('INTEGRATION_TIMING not-json\n'), [])
+            repeated = '\n'.join('INTEGRATION_TIMING ' + json.dumps(rows[0]) for _ in range(20))
+            self.assertEqual(len(runner.public_integration_timings(repeated)), 15)
+
     def test_generated_snapshot_detects_model_changes_additions_and_deletions(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

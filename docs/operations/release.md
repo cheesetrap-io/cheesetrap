@@ -134,10 +134,6 @@ scripts/release-check.sh --acceptance-results .local/acceptance/ACTUAL_RUN/resul
 
 CI uses the same tools and generators for fixture-based Go unit tests, vet, Python
 regressions, isolated PostgreSQL integration, Chromium E2E, and UI tests and build.
-Each integration or E2E batch builds its migration CLI once in a private temporary
-directory and invokes it separately for every prepared database with that
-database's migration-role URL. Build and migration failures abort the batch and
-clean up its owned resources. No executable is reused across batches or checkouts.
 Offline fixtures mean no production network or real SMTP, not that first-time
 module, browser, and image downloads need no network. CI Linux and DB containers
 do not replace real host-boundary acceptance.
@@ -175,6 +171,12 @@ or a minimum hardware size. Use actual input and the [retention guide](retention
 to plan protected data, report copies, WAL, backup, and restore space.
 
 ## Public diagnostics
+
+Integration and E2E `CI_CHECK` summaries also expose up to 15 phase timings per
+command: PostgreSQL startup, bootstrap, migrations, tests, and cleanup. These
+contain only fixed phase names and bounded integer milliseconds, without database
+URLs, credentials, container identifiers, commands, or runtime output. Timings
+are diagnostic only and never change pass/fail decisions.
 
 Automated acceptance prints `CI_CHECK` status per command and source-defined failed
 test names, files, lines, and fixed categories. It reports process return codes

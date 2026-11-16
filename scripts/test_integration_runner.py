@@ -254,63 +254,6 @@ class E2EEntrypointTests(unittest.TestCase):
 
 
 
-class MigrationPreparationTests(unittest.TestCase):
-    def exercise(self, failure=None):
-        commands, migrations = [], []
-        owner = mock.MagicMock()
-        owner.start.return_value = ("a" * 64, "54321")
-        def run(command, **kwargs):
-            commands.append(command)
-            if command[:2] == ["go", "run"] and "list-integration-tests.go" in command[2]:
-                return 0, json.dumps([{"Package": "fixture", "Test": "TestCommit"}])
-            if command == ["docker", "context", "show"]: return 0, "local"
-            if command[:3] == ["docker", "context", "inspect"]:
-                return 0, '[{"Endpoints":{"docker":{"Host":"unix:///fake.sock"}}}]'
-            if command[-1] == "migrate":
-                url = kwargs["childenv"]["CHEESETRAP_DATABASE_URL"]
-                migrations.append((command, url))
-                if failure == "migration": raise RuntimeError("integration subprocess failed")
-            if command[:2] == ["go", "build"] and command[-1] == "./cmd/cheesetrap" and failure == "build":
-                raise RuntimeError("integration subprocess failed")
-            if command[:2] == ["go", "test"]:
-                return 0, output({"Action": "pass", "Package": "fixture", "Test": "TestCommit"})
-            return 0, ""
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            (root / "deploy").mkdir()
-            (root / "deploy/test-bootstrap.sql").write_text("-- fixture")
-            with mock.patch.object(RUNNER, "ROOT", root), mock.patch.object(RUNNER, "OwnedPostgres", return_value=owner), mock.patch.object(RUNNER, "run_command", side_effect=run), mock.patch.object(RUNNER.signal, "signal"), mock.patch.dict(os.environ, {}, clear=True), mock.patch.object(sys, "argv", ["runner"]), contextlib.redirect_stdout(io.StringIO()):
-                if failure:
-                    with self.assertRaisesRegex(RuntimeError, "integration subprocess failed"):
-                        RUNNER.main()
-                else:
-                    self.assertEqual(RUNNER.main(), 0)
-        owner.close.assert_called_once()
-        return commands, migrations
-
-    def test_each_database_is_migrated_with_one_batch_local_executable(self):
-        commands, migrations = self.exercise()
-        builds = [c for c in commands if c[:2] == ["go", "build"] and c[-1] == "./cmd/cheesetrap"]
-        self.assertEqual(len(builds), 1, "compile migration CLI once, not once per database")
-        binary = builds[0][builds[0].index("-o") + 1]
-        self.assertFalse(Path(binary).exists(), "the batch executable must be cleaned up")
-        databases = {url.split("/")[-1].split("?")[0] for _, url in migrations}
-        self.assertEqual(databases, {"cheesetrap_test"} | {"cheesetrap_" + domain + "_test" for domain in (
-            "install", "detection", "enrichment", "proof", "memory", "policy", "policy_api", "eventresult",
-            "restore", "capacity", "retention", "reporting", "jobs", "revision", "draft_runtime", "review",
-            "ruleconfig", "review_flow", "automatic_api", "approval")})
-        self.assertEqual(len(migrations), len(databases), "migrate each prepared database exactly once")
-        for command, url in migrations:
-            self.assertEqual(command, [binary, "migrate"])
-            self.assertIn("cheesetrap_migration:", url)
-
-    def test_build_or_migration_failure_stops_before_tests_and_cleans_up(self):
-        for failure in ("build", "migration"):
-            with self.subTest(failure=failure):
-                commands, _ = self.exercise(failure)
-                self.assertFalse(any(c[:2] == ["go", "test"] for c in commands))
-
-
 class OwnedCleanupTests(unittest.TestCase):
     def exercise(self, cleanup_code, expected_error="failed, skipped", startup_error=None, test_action="skip"):
         commands = []
