@@ -2,7 +2,7 @@
   "schema": 1,
   "scope": "Go application runtime closure and integration Testcontainers tooling, Go runtime, browser runtime (including Vite injected helpers) and engine source notices; container OS/Python dependencies retain their upstream package notices. Build/test dependency versions and license declarations are in package-lock.json/go.sum; not all are redistributed in the app binary.",
   "inputs": {
-    "go.mod": "9e71b5652eb7aa6b4b8fbbd462526a6018c2bfbff0a772f8c039b589859d75ae",
+    "go.mod": "549dd8506499d35345154df2116a00a656933d819388f9c5a65f92aff7d1fc81",
     "go.sum": "657d707c4f1a6b5f71a9a59334989b297c1c9ac0f6bf59aaf87730f6b0471ae1",
     "web/package-lock.json": "71a1562d2b5aa047673dc8ad572af98077f874af49f2f882febe7dbda7fd8849",
     "sensors/images.lock": "5db9be5a25b2270f17c2a17477d423c69328b1ab1e291d450b417b911e7d6b64"
@@ -234,8 +234,8 @@
     },
     {
       "component": "Go",
-      "version": "1.27.3",
-      "source": "https://go.googlesource.com/go/+/refs/tags/go1.27.3/LICENSE",
+      "version": "1.27.4",
+      "source": "https://go.googlesource.com/go/+/refs/tags/go1.27.4/LICENSE",
       "path": "third_party/licenses/go/toolchain-LICENSE.txt",
       "sha256": "911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad"
     },

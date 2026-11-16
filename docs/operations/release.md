@@ -51,7 +51,7 @@ Passing does not establish that container OS or Python packages have no vulnerab
 
 ## Tools and inputs
 
-`deploy/toolchain.lock.json` pins Go 1.27.3, Node 22.23.1, npm 10.9.8, sqlc 1.31.1,
+`deploy/toolchain.lock.json` pins Go 1.27.4, Node 22.23.1, npm 10.9.8, sqlc 1.31.1,
 and Orval 8.46.0. `GOTOOLCHAIN=local` prevents automatic Go version changes.
 Node matches `.nvmrc`. Python 3 standard library, Docker Compose, and BuildKit are
 also required. Record host tools and OS. This is not a fully hermetic build.
@@ -76,7 +76,7 @@ git clone --no-local "$SOURCE_REPOSITORY" cheesetrap-release
 cd cheesetrap-release
 git checkout --detach "$RELEASE_REVISION"
 export GOTOOLCHAIN=local GOENV=off GOWORK=off
-test "$(go env GOVERSION)" = go1.27.3
+test "$(go env GOVERSION)" = go1.27.4
 test "$(node --version)" = v22.23.1
 test "$(npm --version)" = 10.9.8
 scripts/release-check.sh --metadata-only
