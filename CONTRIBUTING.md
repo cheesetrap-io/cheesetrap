@@ -9,7 +9,7 @@ Use [private reporting](SECURITY.md) for vulnerabilities.
 
 ## Run the first checks
 
-Use Go 1.27.3, Node 22.23.1, npm 10.9.8, and Python 3. `.nvmrc`, `go.mod`, and
+Use Go 1.27.4, Node 22.23.1, npm 10.9.8, and Python 3. `.nvmrc`, `go.mod`, and
 `deploy/toolchain.lock.json` pin the tools. Start in the repository root of a fresh
 checkout, in a development shell without production settings. Initial module and
 npm downloads require network access.
