@@ -161,7 +161,13 @@ bindings, image, and cleanup. Go unit tests reject bypasses such as empty host
 addresses and IPv6 wildcards. The same CI step tests an unreachable socket to
 verify there is no daemon fallback. Sequential create and cleanup tests start the
 next batch without waiting for the previous Ryuk to exit, proving session separation
-and resource ownership. If startup or test failure coincides with cleanup failure,
+and resource ownership. An overlapping-lease regression also checks that data and
+cleanup in one owned database cannot affect another. Full integration overlaps at
+most two of its three existing batches, preserving each stack's resource caps and
+serial Go package execution. Every selected batch must pass; nonzero exits do not
+cancel the remaining selected tests. Cancellation waits for active batches to
+release their own resources. Public phase timings retain the original batch order.
+If startup or test failure coincides with cleanup failure,
 the original error stays primary and public output adds a fixed sanitized category.
 
 Network policy, engine, or input-boundary changes require fresh acceptance for the

@@ -61,7 +61,12 @@ policy, or socket permissions. See the [release checks](docs/operations/release.
 for the loopback, locked-image, and cleanup regression commands.
 
 Each integration batch uses a unique Testcontainers session. The default `./...`
-run gives the memory regression batch five minutes so its four-minute context can
+run overlaps at most two of its three independent stacks; packages within each
+stack still run serially. It waits for every selected batch and propagates any
+failure. Cancellation stops active batches and waits for their owned cleanup.
+Peak database limits are therefore two GiB of memory/tmpfs and two CPUs across
+two stacks, before Go test processes and the bounded memory-test child.
+The memory regression batch keeps five minutes so its four-minute context can
 report and clean up. Other batches retain three minutes and the same resource
 limits. To select that test, use `scripts/test-integration.sh ./internal/reporting -run '^TestSecurityAggregateMemory$' -timeout 5m`. An explicit `-timeout` overrides
 the batch default.
