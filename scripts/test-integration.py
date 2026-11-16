@@ -213,6 +213,18 @@ def verify_external_bootstrap(run,docker,container,bootstrap_env,test_env,env):
     print("PASS external bootstrap as non-superuser CREATEROLE database owner and CLI migration",flush=True)
 
 
+def prepare_databases(run, env, test_env):
+    # go run links a new executable for every invocation, even with a warm Go
+    # cache. Reuse one binary only within this batch; each database still runs
+    # the real CLI under its migration role, and any build/migration error fails.
+    with tempfile.TemporaryDirectory(prefix="cheesetrap-migrate-") as directory:
+        binary = str(Path(directory) / "cheesetrap")
+        run(["go", "build", "-o", binary, "./cmd/cheesetrap"], timeout=180)
+        for domain in ("", "INSTALL", "DETECTION", "ENRICHMENT", "PROOF", "MEMORY", "POLICY", "POLICY_API", "EVENTRESULT", "RESTORE", "CAPACITY", "RETENTION", "REPORTING", "JOBS", "REVISION", "DRAFT_RUNTIME", "REVIEW", "RULECONFIG", "REVIEW_FLOW", "AUTOMATIC_API", "APPROVAL"):
+            key = "CHEESETRAP_TEST_" + (domain + "_" if domain else "") + "MIGRATION_URL"
+            run([binary, "migrate"], childenv=dict(env, CHEESETRAP_DATABASE_URL=test_env[key]), timeout=180)
+
+
 def main(e2e=False, selection=None):
     os.umask(0o077)
     if e2e and sys.argv[1:]:
@@ -299,16 +311,7 @@ def main(e2e=False, selection=None):
             childenv=bootstrap_env, data=(ROOT / "deploy/test-bootstrap.sql").read_text())
         _, version = run(docker + ["exec", "--env", "PGPASSWORD", container, "psql", "-X", "-At", "-h", "127.0.0.1", "-U", "postgres", "-d", "cheesetrap_test", "-c", "SHOW server_version"], childenv=bootstrap_env)
         print("PostgreSQL " + version.strip(), flush=True)
-        migration_env = dict(env, CHEESETRAP_DATABASE_URL=test_env["CHEESETRAP_TEST_MIGRATION_URL"])
-        run(["go", "run", "./cmd/cheesetrap", "migrate"], childenv=migration_env, timeout=180)
-        install_env = dict(env, CHEESETRAP_DATABASE_URL=test_env["CHEESETRAP_TEST_INSTALL_MIGRATION_URL"])
-        run(["go", "run", "./cmd/cheesetrap", "migrate"], childenv=install_env, timeout=180)
-        detection_env = dict(env, CHEESETRAP_DATABASE_URL=test_env["CHEESETRAP_TEST_DETECTION_MIGRATION_URL"])
-        run(["go", "run", "./cmd/cheesetrap", "migrate"], childenv=detection_env, timeout=180)
-        enrichment_env = dict(env, CHEESETRAP_DATABASE_URL=test_env["CHEESETRAP_TEST_ENRICHMENT_MIGRATION_URL"])
-        run(["go", "run", "./cmd/cheesetrap", "migrate"], childenv=enrichment_env, timeout=180)
-        for domain in ("PROOF", "MEMORY", "POLICY", "POLICY_API", "EVENTRESULT", "RESTORE", "CAPACITY", "RETENTION", "REPORTING", "JOBS", "REVISION", "DRAFT_RUNTIME", "REVIEW", "RULECONFIG", "REVIEW_FLOW", "AUTOMATIC_API", "APPROVAL"):
-            run(["go", "run", "./cmd/cheesetrap", "migrate"], childenv=dict(env, CHEESETRAP_DATABASE_URL=test_env[f"CHEESETRAP_TEST_{domain}_MIGRATION_URL"]), timeout=180)
+        prepare_databases(run, env, test_env)
         print("Prepared migrated test/acceptance/detection/enrichment/reporting/jobs/revision/draft-runtime databases and separate empty migration-test database", flush=True)
         if e2e:
             test_env["CHEESETRAP_E2E_RUN"] = "1"

@@ -223,6 +223,18 @@ elif a[0] == 'rm':
 
 
 class QemuWorkflowTests(unittest.TestCase):
+    def test_merge_queue_runs_the_full_automatic_suite_without_cancellation(self):
+        workflow = (ROOT/'.github/workflows/ci.yml').read_text()
+        triggers = workflow.split('\non:\n', 1)[1].split('\nconcurrency:', 1)[0]
+        self.assertIn('  merge_group:\n    types: [checks_requested]\n', triggers)
+        self.assertNotRegex(triggers, r'paths(?:-ignore)?:')
+        self.assertIn("cancel-in-progress: ${{ github.event_name == 'pull_request' }}", workflow)
+        # Every automatic job runs for merge_group, including image tests. No
+        # event condition may silently make the full-suite queue gate a subset.
+        self.assertNotRegex(workflow, re.compile(r'^    if:', re.M))
+        self.assertIn('scripts/test-acceptance.sh --automated-only', workflow)
+        self.assertIn('scripts/test-python.py image --image cheesetrap-web:ci', workflow)
+
     def test_fixed_ci_policy_keeps_identity_pins_and_disposable_guard(self):
         workflow = (ROOT/'.github/workflows/arm64-image.yml').read_text()
         guard = workflow.index('Require GitHub-hosted Linux x86_64')

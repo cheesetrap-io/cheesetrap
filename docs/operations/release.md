@@ -11,12 +11,17 @@ deploy to production, or send reports.
 
 | File and display name | Role |
 | --- | --- |
-| `ci.yml`, `CI - checks (auto/manual)` | Automatic master pushes and PR checks and manual checks on GitHub-hosted `ubuntu-24.04` runners. Run names include event and branch. |
+| `ci.yml`, `CI - checks (auto/manual)` | Automatic master pushes, PR and merge-queue checks, and manual checks on GitHub-hosted `ubuntu-24.04` runners. Run names include event and branch. |
 | `arm64-image.yml`, `ARM64 image (manual)` | Manual only. Builds the ARM64 runtime image under QEMU on a GitHub-hosted x86_64 runner and runs the CLI smoke. A passing `ci.yml` run does not include this check. |
 
 Automatic push runs apply only to master. PR and manual runs remain available.
 Only a newer run with the same workflow, event, and PR number cancels an older run.
-Master-push and manual runs use per-run groups and do not cancel each other.
+Master-push, merge-queue and manual runs use per-run groups and do not cancel each other.
+Every event runs the same full suite, including image builds and engine tests.
+The `merge_group` trigger prepares CI for a queue; it does not enable or enforce
+one. GitHub's native merge queue requires an organization-owned repository. Until
+the repository is eligible and a queue is required for master, keep full PR
+coverage. Do not replace it with affected-only checks.
 
 `scripts/test-acceptance.py` owns SQL, OpenAPI, UI type generation, contract and
 generated-diff checks, and the UI build. CI's `Check current automated result`
@@ -129,6 +134,10 @@ scripts/release-check.sh --acceptance-results .local/acceptance/ACTUAL_RUN/resul
 
 CI uses the same tools and generators for fixture-based Go unit tests, vet, Python
 regressions, isolated PostgreSQL integration, Chromium E2E, and UI tests and build.
+Each integration or E2E batch builds its migration CLI once in a private temporary
+directory and invokes it separately for every prepared database with that
+database's migration-role URL. Build and migration failures abort the batch and
+clean up its owned resources. No executable is reused across batches or checkouts.
 Offline fixtures mean no production network or real SMTP, not that first-time
 module, browser, and image downloads need no network. CI Linux and DB containers
 do not replace real host-boundary acceptance.
