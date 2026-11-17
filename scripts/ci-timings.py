@@ -189,7 +189,10 @@ def collect(repo, number, run_id, read=None):
     cohorts = [r for r in candidates if r.get('event') == 'pull_request' and associated(r, pr)]
     require(bool(cohorts) and min(cohorts, key=lambda r: (timestamp(r['created_at']), r['id']))['id'] == run_id,
             'selected run is not the first associated PR cohort')
-    if not run.get('pull_requests'):
+    closed_head = (pr.get('state') == 'closed' and pr.get('merged_at') is None and
+                   pr.get('head', {}).get('sha') == run.get('head_sha') and
+                   bool(re.fullmatch('[a-f0-9]{40}', run.get('head_sha', ''))))
+    if not run.get('pull_requests') and not closed_head:
         links = read(f'{base}/commits/{run["head_sha"]}/pulls?per_page=100')
         require(any(p.get('number') == number and p.get('base', {}).get('repo', {}).get('full_name') == repo
                     for p in links), 'head commit lacks PR association')
@@ -205,7 +208,10 @@ def collect(repo, number, run_id, read=None):
     tree_id = run.get('head_commit', {}).get('tree_id', '')
     require(bool(re.fullmatch('[a-f0-9]{40}', tree_id)), 'missing immutable source tree')
     configuration = configuration_id(read(f'{base}/git/trees/{tree_id}?recursive=1'))
-    return measure(repo, pr, run, jobs, checks, configuration)
+    result = measure(repo, pr, run, jobs, checks, configuration)
+    if not run.get('pull_requests') and closed_head:
+        result['attribution'] = 'head-repository-branch-window-and-pr-head'
+    return result
 
 
 def sample(value):
