@@ -44,7 +44,7 @@ Source checks overlap locked npm preparation with Python regressions, then run G
 unit/vet, UI, SQL/OpenAPI generation and drift checks. Browser prepares Chromium
 and runs the existing Go E2E and browser harness. Failed browser preparation stops
 before another E2E install. Integration runs every
-existing test across five required CI shards on separate runners. Each
+existing test across six required CI shards on separate runners. Each
 component verifies all its concrete T01–T13 tests and labels requirements owned by
 another component. A component result cannot pass the complete acceptance gate.
 
@@ -96,16 +96,16 @@ together; store starts when a slot is free. Packages within each stack still run
 serially. New packages enter the remaining-packages batch. It waits for every
 selected batch and propagates any failure. Cancellation stops active batches and
 waits for their owned cleanup.
-CI splits those same tests into memory, jobs, retention, other packages and store
+CI splits those same tests into memory, jobs, retention, API, other packages and store
 shards, each with its own runner and one fresh stack. Every discovered test is
 assigned once; new packages enter the other-packages shard. The required matrix
 uses `fail-fast: false` and never ignores a failed shard. Integration-matrix
-database caps total five GiB of memory/tmpfs and five CPUs across five runners,
+database caps total six GiB of memory/tmpfs and six CPUs across six runners,
 before the unchanged bounded memory-test child. The browser E2E and live
 Testcontainers jobs retain their own existing limits. Local full runs still use
 at most three stacks as described above.
-Peak database limits are therefore three GiB of memory/tmpfs and three CPUs across
-three stacks, before Go test processes and the bounded memory-test child.
+For local full runs, peak database limits are three GiB of memory/tmpfs and three
+CPUs across three stacks, before Go test processes and the bounded memory-test child.
 The memory regression batch keeps five minutes so its four-minute context can
 report and clean up. Other batches retain three minutes and the same resource
 limits. To select that test, use `scripts/test-integration.sh ./internal/reporting -run '^TestSecurityAggregateMemory$' -timeout 5m`. An explicit `-timeout` overrides

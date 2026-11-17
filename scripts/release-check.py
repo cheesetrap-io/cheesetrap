@@ -30,7 +30,7 @@ COMPONENT_COMMANDS = {
     'browser': ('e2e',),
     'integration': ('integration',),
 }
-INTEGRATION_SHARDS = ('memory', 'jobs', 'retention', 'other', 'store')
+INTEGRATION_SHARDS = ('memory', 'jobs', 'retention', 'api', 'other', 'store')
 
 
 def require(condition, reason):
@@ -208,7 +208,7 @@ def shard_owns(test, shard):
     if shard == 'memory': return memory
     if memory: return False
     packages = {'jobs': 'cheesetrap/internal/jobs', 'retention': 'cheesetrap/internal/retention',
-                'store': 'cheesetrap/internal/store'}
+                'api': 'cheesetrap/internal/api', 'store': 'cheesetrap/internal/store'}
     return test['package'] not in packages.values() if shard == 'other' else test['package'] == packages[shard]
 
 

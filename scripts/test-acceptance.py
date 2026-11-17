@@ -21,7 +21,7 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 LINUX_CHECKS = {'linux-install', 'linux-public-boundary', 'linux-sensor-egress', 'linux-ipv6'}
-INTEGRATION_SHARDS = ('memory', 'jobs', 'retention', 'other', 'store')
+INTEGRATION_SHARDS = ('memory', 'jobs', 'retention', 'api', 'other', 'store')
 
 
 class AcceptanceInterrupted(Exception):
@@ -593,7 +593,7 @@ def integration_shard_for(test):
     if test['package'] == 'cheesetrap/internal/reporting' and test['name'] == 'TestSecurityAggregateMemory':
         return 'memory'
     return {'cheesetrap/internal/jobs': 'jobs', 'cheesetrap/internal/retention': 'retention',
-            'cheesetrap/internal/store': 'store'}.get(test['package'], 'other')
+            'cheesetrap/internal/api': 'api', 'cheesetrap/internal/store': 'store'}.get(test['package'], 'other')
 
 
 def evaluate_component(manifest, suites, component, shard=None):
