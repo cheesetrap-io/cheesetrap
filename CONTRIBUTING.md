@@ -29,6 +29,10 @@ python3 -B scripts/check_links.py
 These checks cover local fixtures, Python regressions, UI unit tests, and the
 embedded UI build. Plain `go test ./...` does not start Docker. They do not prove
 host firewall isolation, public sensor reachability, or production load capacity.
+Python regressions run every collected file once with at most two processes.
+Ordinary failures and timeouts retain the other files' results; any failure,
+skip or empty collection fails the gate. Per-file deadlines stay unchanged,
+and interruption waits for owned process-group cleanup without launching queued work.
 
 CI uses a documentation-only PR scope only when every changed path is a regular
 Markdown document under `docs/` or root `README.md`/`CONTRIBUTING.md`, excluding
