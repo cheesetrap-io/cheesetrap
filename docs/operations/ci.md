@@ -111,6 +111,49 @@ scripts/release-check.sh --metadata-only
 These commands parse and validate documentation without running its deployment
 commands. They do not replace a queued candidate's complete checks.
 
+## Measure first PR results
+
+With an authenticated `gh` CLI, record completed native PR runs without starting
+or rerunning workflows:
+
+```sh
+python3 -B scripts/ci-timings.py --sample 25:44091098271 --sample 26:44097216458
+```
+
+Repeat `--sample PR_NUMBER:RUN_ID` for each PR in the observation window. The tool
+reads attempt one, checks that the selected run is the first associated PR cohort,
+and rejects duplicate PRs or runs. A newer head or successful rerun cannot replace
+that first result. It verifies the current 13-job inventory, native GitHub Actions
+app, exact head revision, run/job URLs and required-context conclusions. Merged PRs
+can lose native run-to-PR links; in that case it requires the same head repository
+and branch during the PR's lifetime plus a GitHub commit-to-PR association. The
+record identifies which attribution was used. Incomplete or unsupported metadata
+fails collection instead of supplying a guessed zero or a partial summary.
+
+`pr_to_required_seconds` includes the time from PR creation to workflow creation
+and ends at the latest of the three required contexts' completion timestamps.
+`pipeline_seconds` and `trigger_delay_seconds` show those intervals separately.
+`runner_job_seconds` sums actual job intervals across the supplied first attempt,
+including failed jobs. It is elapsed runner use, not a billing estimate; it does
+not include queue candidates, master pushes or additional attempts. Unallocated
+cancelled/skipped jobs with unknown intervals make that cost unknown.
+
+Ordinary failed first attempts remain in the quantiles and failure count.
+Documentation-only and cancelled runs retain their individual timings and costs
+but are explicitly excluded from normal full-PR quantiles. Supply every normal PR
+in the chosen window, including failures; the tool cannot detect omitted input PRs.
+It groups results by a fingerprint of workflow, tool/image locks, harness scripts,
+coverage inventory and the bounded memory fixture. Application and regression-test
+code may differ within a group. This fingerprint separates CI procedures, not
+identical workloads or runner hosts.
+
+Each group reports its sample count, median and nearest-rank p95. The
+`observed_targets_met` flag requires at least three eligible PRs, median below 120
+seconds and p95 below 180 seconds. This describes only the supplied observations;
+a small sample does not establish a long-run p95. Report the window, sample size,
+failures, configuration and runner cost with any target claim. This measurement
+tool does not alter verification scopes, checks, deadlines or merge-queue policy.
+
 ## Confirm the checkout repository
 
 An Actions run's actor is the account that triggered the run. That account name
