@@ -30,6 +30,13 @@ These checks cover local fixtures, Python regressions, UI unit tests, and the
 embedded UI build. Plain `go test ./...` does not start Docker. They do not prove
 host firewall isolation, public sensor reachability, or production load capacity.
 
+CI uses a documentation-only PR scope only when every changed path is a regular
+Markdown document under `docs/` or root `README.md`/`CONTRIBUTING.md`, excluding
+`AGENTS.md`. It runs operation-doc regressions, links and release metadata; secret
+and dependency checks still run. Any code, configuration, lockfile, unusual path or
+unknown comparison selects all checks. The enforced merge queue always runs the
+complete suite before merging, including for documentation-only PRs.
+
 ## Test a behavior change
 
 1. Choose one observable behavior and run a failing test first. This is the

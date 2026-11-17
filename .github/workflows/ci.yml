@@ -84,21 +84,38 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
+      - name: Determine verification scope
+        id: scope
+        env:
+          CI_EVENT: ${{ github.event_name }}
+          CI_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          CI_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: python3 -B scripts/ci-scope.py --event "$CI_EVENT" --base "$CI_BASE_SHA" --head "$CI_HEAD_SHA" --fetch-missing
+      - name: Check documentation PR
+        if: ${{ github.event_name == 'pull_request' && steps.scope.outputs.scope == 'docs' }}
+        run: |
+          python3 -B scripts/test-python.py unit scripts/test_operations_docs.py
+          python3 -B scripts/check_links.py
+          scripts/release-check.sh --metadata-only
       - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        if: ${{ github.event_name != 'pull_request' || steps.scope.outputs.scope != 'docs' }}
         with:
           go-version: '1.27.4'
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        if: ${{ github.event_name != 'pull_request' || steps.scope.outputs.scope != 'docs' }}
         with:
           node-version: '22.23.1'
           cache: npm
           cache-dependency-path: web/package-lock.json
       - name: Check release metadata and tool versions
+        if: ${{ github.event_name != 'pull_request' || steps.scope.outputs.scope != 'docs' }}
         run: |
           scripts/release-check.sh --metadata-only
           test "$(go env GOVERSION)" = go1.27.4
           test "$(node --version)" = v22.23.1
           test "$(npm --version)" = 10.9.8
       - name: Prepare locked dependencies and browser (network allowed)
+        if: ${{ github.event_name != 'pull_request' || steps.scope.outputs.scope != 'docs' }}
         run: |
           go mod download
           go mod verify
@@ -106,20 +123,33 @@ jobs:
           cd web
           npx --no-install playwright install --with-deps chromium
       - name: Verify Testcontainers loopback ports and locked Ryuk image
+        if: ${{ github.event_name != 'pull_request' || steps.scope.outputs.scope != 'docs' }}
         run: python3 -B scripts/test-testcontainers.py
       - name: Offline unit, disposable DB integration and UI acceptance
+        if: ${{ github.event_name != 'pull_request' || steps.scope.outputs.scope != 'docs' }}
         run: scripts/test-acceptance.sh --automated-only
       - name: Check current automated result
+        if: ${{ github.event_name != 'pull_request' || steps.scope.outputs.scope != 'docs' }}
         run: |
           result=$(python3 -c 'from pathlib import Path; print(max(Path(".local/acceptance").glob("*/results.json")))')
           scripts/release-check.sh --acceptance-results "$result"
       - name: Build pinned images
+        if: ${{ github.event_name != 'pull_request' || steps.scope.outputs.scope != 'docs' }}
         run: |
           docker build -f deploy/Dockerfile -t cheesetrap:ci .
           docker build --target patched -t cheesetrap-web:ci sensors/web
       - name: Test pinned engine Python boundaries and real reactor
+        if: ${{ github.event_name != 'pull_request' || steps.scope.outputs.scope != 'docs' }}
         timeout-minutes: 5
         run: python3 -B scripts/test-python.py image --image cheesetrap-web:ci
       - name: Explain external gates
         if: always()
-        run: echo 'PASS_AUTOMATED covers general Python regressions, offline fixtures, disposable DB and UI. Engine Python boundaries and reactor are a separate required step after image build. Actual Linux network and load verification is a separately scoped release step; CI does not run or replace it. Private logs are never uploaded.' >> "$GITHUB_STEP_SUMMARY"
+        env:
+          CI_EVENT: ${{ github.event_name }}
+          CI_SCOPE: ${{ steps.scope.outputs.scope }}
+        run: |
+          if [ "$CI_EVENT" = pull_request ] && [ "$CI_SCOPE" = docs ]; then
+            echo 'Documentation-only PR scope: runbook regressions, links and release metadata. Secret and dependency checks remain required. This is not PASS_AUTOMATED; the merge queue must run the complete suite before merge.' >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo 'Full-suite scope: PASS_AUTOMATED covers general Python regressions, offline fixtures, disposable DB and UI. Engine Python boundaries and reactor remain required after image build. Actual Linux network and load verification is a separately scoped release step. Private logs are never uploaded.' >> "$GITHUB_STEP_SUMMARY"
+          fi

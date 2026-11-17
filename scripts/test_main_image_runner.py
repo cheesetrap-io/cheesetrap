@@ -248,6 +248,20 @@ class MergeQueuePolicyTests(unittest.TestCase):
 
 
 class QemuWorkflowTests(unittest.TestCase):
+    def test_documentation_scope_cannot_reduce_merge_queue_or_unknown_scope(self):
+        workflow = (ROOT/'.github/workflows/ci.yml').read_text().split('\n  automated:\n', 1)[1]
+        self.assertIn('scripts/ci-scope.py', workflow)
+        blocks = workflow.split('      - ')[1:]
+        guarded = []
+        for block in blocks:
+            if any(marker in block for marker in ('actions/checkout@', 'id: scope',
+                                                   'Check documentation PR', 'Explain external gates')):
+                continue
+            self.assertIn("if: ${{ github.event_name != 'pull_request' || steps.scope.outputs.scope != 'docs' }}", block)
+            guarded.append(block)
+        self.assertEqual(len(guarded), 9, 'every original full-suite setup/check must retain its queue guard')
+        self.assertIn("if: ${{ github.event_name == 'pull_request' && steps.scope.outputs.scope == 'docs' }}", workflow)
+
     def test_merge_queue_runs_the_full_automatic_suite_without_cancellation(self):
         workflow = (ROOT/'.github/workflows/ci.yml').read_text()
         triggers = workflow.split('\non:\n', 1)[1].split('\nconcurrency:', 1)[0]

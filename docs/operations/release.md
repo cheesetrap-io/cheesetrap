@@ -17,7 +17,13 @@ deploy to production, or send reports.
 Automatic push runs apply only to master. PR and manual runs remain available.
 Only a newer run with the same workflow, event, and PR number cancels an older run.
 Master-push, merge-queue and manual runs use per-run groups and do not cancel each other.
-Every event runs the same full suite, including image builds and engine tests.
+Merge-queue, master-push and manual events run the full suite, including image
+builds and engine tests. PRs whose complete base-to-head diff contains only regular
+Markdown files under `docs/` or root `README.md`/`CONTRIBUTING.md` run operation-doc
+regressions, relative-link checks and release metadata instead of unrelated runtime
+work. Secret and dependency checks remain required on every PR. Instruction files,
+non-regular files, code/config/lock changes, an empty diff or an unavailable diff
+select the full suite. Renames inspect both removed and added paths.
 The organization-owned repository requires GitHub's native merge queue for the
 default branch, master. The desired policy is recorded in
 [`merge-queue.ruleset.json`](../../.github/merge-queue.ruleset.json): no bypass
@@ -25,8 +31,9 @@ actors, all three checks from GitHub Actions, one candidate at a time, and
 `ALLGREEN` grouping. The queue checks the latest combined candidate before merge.
 PR checks do not additionally require rebasing onto every new master commit.
 The queue's 45-minute response deadline does not widen any test or job timeout.
-Full PR coverage remains enabled until a separately verified change introduces
-affected checks.
+The workflow independently forces full coverage outside `pull_request`, even if
+the scope selector returns a reduced scope. Documentation PR results are explicitly
+labelled and never claim `PASS_AUTOMATED` or queue-candidate acceptance.
 
 The JSON file records configuration; editing it alone does not update GitHub.
 Verify the active [repository rulesets](https://github.com/cheesetrap-io/cheesetrap/rules)
