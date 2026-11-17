@@ -407,6 +407,40 @@ def public_integration_timings(output):
     return timings
 
 
+def public_package_timings(logs, sources):
+    """Project bounded package durations; never expose test names or raw events."""
+    allowed = set()
+    for name in sources:
+        if re.fullmatch(r'(?:[A-Za-z0-9_-]+/)*[A-Za-z0-9_.-]+\.go', name):
+            directory = str(Path(name).parent)
+            allowed.add('cheesetrap' + ('/' + directory if directory != '.' else ''))
+    if not isinstance(logs, list): return []
+    timings = []
+    for batch, relative in enumerate(logs[:64], 1):
+        if not isinstance(relative, str) or not re.fullmatch(r'\.local/[A-Za-z0-9_./-]+\.jsonl', relative):
+            continue
+        try:
+            path = (ROOT / relative).resolve()
+            if not path.is_relative_to((ROOT / '.local').resolve()) or not path.is_file(): continue
+            output = path.read_text(errors='replace')
+        except (OSError, RuntimeError):
+            continue
+        values, ambiguous = {}, set()
+        for line in output.splitlines():
+            try: event = json.loads(line)
+            except (ValueError, RecursionError): continue
+            if not isinstance(event, dict) or event.get('Action') != 'pass' or 'Test' in event: continue
+            package, elapsed = event.get('Package'), event.get('Elapsed')
+            if not isinstance(package, str) or package not in allowed: continue
+            if type(elapsed) not in (int, float) or not 0 <= elapsed <= 1200: continue
+            if package in values: ambiguous.add(package)
+            else: values[package] = round(elapsed * 1000)
+        for package in sorted(values.keys() - ambiguous):
+            timings.append({'batch': batch, 'package': package, 'elapsed_ms': values[package]})
+            if len(timings) == 64: return timings
+    return timings
+
+
 def print_public_summary(commands):
     tracked = subprocess.check_output(['git', 'ls-files', '-z'], cwd=ROOT).decode().split('\0')
     sources = {name: (ROOT / name).read_text() for name in tracked
@@ -421,6 +455,9 @@ def print_public_summary(commands):
         if name in ('integration', 'e2e') and command.get('log') and (ROOT / command['log']).is_file():
             timings = public_integration_timings((ROOT / command['log']).read_text(errors='replace'))
             if timings: row['timings'] = timings
+        if name in ('integration', 'e2e'):
+            packages = public_package_timings(command.get('test_logs'), sources)
+            if packages: row['package_timings'] = packages
         if name == 'ui':
             _, diagnostics = ui_check(ROOT / command['report'], command.get('returncode'), sources,
                                       command.get('process_status', 'exited'))

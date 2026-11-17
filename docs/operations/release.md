@@ -202,6 +202,15 @@ contain only fixed phase names and bounded integer milliseconds, without databas
 URLs, credentials, container identifiers, commands, or runtime output. Timings
 are diagnostic only and never change pass/fail decisions.
 
+Those summaries also project up to 64 package timings from validated private
+batch logs. Each row contains a batch ordinal, a package name derived from tracked
+Go source directories, and the Go reporter's elapsed time rounded to milliseconds
+(bounded to 20 minutes). Test/subtest events, unknown packages, malformed values,
+ambiguous duplicate package results, and paths outside `.local` are excluded from
+this diagnostic projection. Raw events and runtime output stay private. Package
+times are separate observations, not additive wall time across concurrent batches;
+their presence never changes command or acceptance status.
+
 Automated acceptance prints `CI_CHECK` status per command and source-defined failed
 test names, files, lines, and fixed categories. It reports process return codes
 separately from report validity. It never publishes dynamic subtest names, runtime
