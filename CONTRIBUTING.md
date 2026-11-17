@@ -37,21 +37,22 @@ and dependency checks still run. Any code, configuration, lockfile, unusual path
 unknown comparison selects all checks. The enforced merge queue always runs the
 complete suite before merging, including for documentation-only PRs.
 
-CI invokes automated acceptance with `--automated-only --prepare-web`, overlapping
-locked npm and Chromium preparation with Python regressions. Both finish before
-Go unit tests, vet and DB work. Failed web preparation stops acceptance before
-E2E can attempt another install; Python failures remain required results.
-Without `--prepare-web`, local acceptance uses already prepared web dependencies.
-Acceptance then overlaps integration with compilation of the pinned SQL generator.
-SQL compiler preparation uses one Go CPU and one build process. Unit tests keep
-their execution settings; integration owns at most three bounded database stacks.
-E2E, UI builds and source generators start only after
-both lanes finish; every command result remains required and cancellation waits
-for owned cleanup. The original SQL generation and byte-for-byte drift check
-remain required. A failing command cannot suppress the other lane's results.
+CI runs the source component (`--automated-only --prepare-web --component source`)
+and the complete Go integration component (`--automated-only --component integration`)
+on separate runners. Source checks overlap npm/Chromium preparation with Python
+regressions, then run Go unit/vet, E2E, UI, SQL/OpenAPI generation and drift checks.
+Failed web preparation stops before another E2E install. Integration runs every
+existing batch and test, with at most three bounded database stacks. Each
+component verifies all its concrete T01–T13 tests and labels requirements owned by
+the other component. A component result cannot pass the complete acceptance gate.
 
-CI runs acceptance, live Testcontainers regressions and image/engine checks on
-separate runners. The required `automated` verdict waits for all three and fails
+Local acceptance without `--component` still runs the complete sequence, including
+SQL compiler preparation alongside integration. Without `--prepare-web`, it uses
+already prepared web dependencies. Unit/test flags stay unchanged; E2E and source
+generators wait for local Go work, and cancellation waits for owned cleanup.
+
+CI also runs live Testcontainers regressions and image/engine checks on separate
+runners. The required `automated` verdict waits for all four work jobs and fails
 unless every job succeeds, including when work is cancelled or skipped. Each
 runner owns its disposable resources; private evidence is not uploaded between
 jobs. See the [CI guide](docs/operations/ci.md) for scope and result locations.

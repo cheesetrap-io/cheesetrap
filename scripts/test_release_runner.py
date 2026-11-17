@@ -167,6 +167,61 @@ class ReleaseGateTests(unittest.TestCase):
     def test_current_automated_result_keeps_linux_scope_separate(self):
         self.checker.validate_acceptance(self.evidence(), "a" * 40, {"go.mod": "b" * 64})
 
+    def test_component_cannot_claim_a_complete_automated_result(self):
+        result = self.evidence()
+        result['component'] = 'source'
+        with self.assertRaisesRegex(ValueError, 'component'):
+            self.checker.validate_acceptance(result, "a" * 40, {"go.mod": "b" * 64})
+
+    def test_component_gate_requires_every_owned_command_and_requirement(self):
+        self.assertTrue(callable(getattr(self.checker, 'validate_component', None)),
+                        'a partial CI result needs its own explicit verifier')
+        spec = importlib.util.spec_from_file_location('acceptance_component', ROOT / 'scripts/test-acceptance.py')
+        runner = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(runner)
+        manifest = json.loads((ROOT / 'tests/acceptance/coverage.json').read_text())
+        suites = {name: set() for name in ('go', 'integration', 'e2e', 'browser', 'ui')}
+        for row in manifest['requirements']:
+            for test in row['tests']:
+                suites[test['suite']].add((test['package'], test['name']))
+            for suite in ('browser', 'ui'):
+                suites[suite].update((test['file'], test['name']) for test in row.get(suite + '_tests', []))
+        self.assertEqual(set().union(*map(set, self.checker.COMPONENT_COMMANDS.values())),
+                         set(self.checker.ACCEPTANCE_COMMANDS), 'every original command remains required')
+        self.assertFalse(set(self.checker.COMPONENT_COMMANDS['source']) & set(self.checker.COMPONENT_COMMANDS['integration']))
+        for component, names in [('source', [name for name in self.checker.ACCEPTANCE_COMMANDS if name != 'integration']),
+                                 ('integration', ['integration'])]:
+            result = self.evidence()
+            result.update(status='PASS_COMPONENT', component=component, prepare_web=False,
+                          commands=[dict(name=name, status='PASS') for name in names],
+                          requirements=runner.evaluate_component(manifest, suites, component))
+            def validate(row, name=component):
+                self.checker.validate_component(row, 'a' * 40, {'go.mod': 'b' * 64}, name, manifest)
+            validate(result)
+            with self.assertRaises(ValueError):
+                self.checker.validate_acceptance(result, 'a' * 40, {'go.mod': 'b' * 64})
+            for field, value in [('status', 'PASS_AUTOMATED'), ('component', 'other'),
+                                 ('revision', 'c' * 40), ('checkout_clean', False),
+                                 ('prepare_web', 'true'), ('requirements', [])]:
+                bad = dict(result, **{field: value})
+                with self.subTest(component=component, field=field), self.assertRaises(ValueError):
+                    validate(bad)
+            for index in range(len(names)):
+                bad = dict(result, commands=result['commands'][:index] + result['commands'][index + 1:])
+                with self.subTest(component=component, missing=names[index]), self.assertRaises(ValueError):
+                    validate(bad)
+            for row in result['requirements']:
+                previous = row['status']
+                row['status'] = 'PASS' if previous == 'OUT_OF_COMPONENT' else 'FAIL'
+                with self.subTest(component=component, requirement=row['id']), self.assertRaises(ValueError):
+                    validate(result)
+                row['status'] = previous
+            result['prepare_web'] = True
+            result['commands'].append(dict(name='web-prepare', status='PASS'))
+            if component == 'source': validate(result)
+            else:
+                with self.assertRaises(ValueError): validate(result)
+
     def test_ci_web_preparation_is_an_additional_required_success(self):
         result = self.evidence()
         result['prepare_web'] = True

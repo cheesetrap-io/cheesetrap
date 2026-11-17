@@ -256,8 +256,8 @@ class QemuWorkflowTests(unittest.TestCase):
         self.assertIsNotNone(match, name + ' must report a separate job result')
         return match.group(1)
 
-    def test_acceptance_build_cache_is_seeded_only_after_successful_master_checks(self):
-        acceptance = self.ci_job('acceptance')
+    def check_master_build_cache(self, job, component):
+        acceptance = self.ci_job(job)
         blocks = acceptance.split('      - ')[1:]
         restore = [b for b in blocks if 'actions/cache/restore@' in b]
         save = [b for b in blocks if 'actions/cache/save@' in b]
@@ -265,7 +265,7 @@ class QemuWorkflowTests(unittest.TestCase):
         self.assertEqual(len(save), 1, 'successful master acceptance must refresh application objects')
         restore, save = restore[0], save[0]
         self.assertLess(acceptance.index(restore), acceptance.index('scripts/test-acceptance.sh'))
-        self.assertGreater(acceptance.index(save), acceptance.index('scripts/release-check.sh --acceptance-results'))
+        self.assertGreater(acceptance.index(save), acceptance.index('scripts/release-check.sh --component-results ' + component))
         path = '${{ steps.go-build-cache.outputs.path }}'
         self.assertIn('go env GOCACHE', acceptance)
         for step in (restore, save):
@@ -276,8 +276,13 @@ class QemuWorkflowTests(unittest.TestCase):
         self.assertIn("hashFiles('go.mod', 'go.sum')", restore)
         self.assertIn('${{ github.sha }}', restore, 'new master commits must be able to refresh immutable keys')
         key = re.search(r'^          key: (.+)$', restore, re.M).group(1)
-        prefix = re.search(r'^          restore-keys: (.+)$', restore, re.M).group(1)
-        self.assertEqual(prefix, key.removesuffix('${{ github.sha }}'))
+        if 'restore-keys: |\n' in restore:
+            prefixes = [line.strip() for line in restore.split('restore-keys: |\n', 1)[1].splitlines() if line.strip()]
+        else:
+            prefixes = [re.search(r'^          restore-keys: (.+)$', restore, re.M).group(1)]
+        prefix = key.removesuffix('${{ github.sha }}')
+        self.assertEqual(prefixes[0], prefix)
+        self.assertTrue(set(prefixes) <= {prefix, prefix.replace('integration-go-build', 'acceptance-go-build')})
         self.assertIn('key: ${{ steps.go-build-restore.outputs.cache-primary-key }}', save)
 
         # Evaluate the workflow's actual predicate across events, failures and
@@ -304,17 +309,25 @@ class QemuWorkflowTests(unittest.TestCase):
                             self.assertEqual(actual, success and event == 'push' and
                                              ref == 'refs/heads/master' and hit != 'true')
 
+    def test_acceptance_build_cache_is_seeded_only_after_successful_master_checks(self):
+        self.check_master_build_cache('acceptance', 'source')
+
+    def test_integration_build_cache_is_seeded_only_after_successful_master_checks(self):
+        self.check_master_build_cache('integration', 'integration')
+
     def test_required_verdict_runs_after_every_independent_job_even_on_failure(self):
         verdict = self.ci_job('automated')
-        self.assertIn('needs: [acceptance, testcontainers, engines]', verdict)
+        self.assertIn('needs: [acceptance, integration, testcontainers, engines]', verdict)
         self.assertIn('if: always()', verdict)
         self.assertNotIn("contains(needs.*.result, 'failure')", verdict)
         self.assertIn('Require all automated work', verdict)
         for variable, job in [('ACCEPTANCE_RESULT', 'acceptance'),
+                              ('INTEGRATION_RESULT', 'integration'),
                               ('CONTAINERS_RESULT', 'testcontainers'), ('ENGINES_RESULT', 'engines')]:
             self.assertIn(variable + ': ${{ needs.' + job + '.result }}', verdict)
         script = textwrap.dedent(verdict.split('run: |\n', 1)[1])
-        successful = dict(ACCEPTANCE_RESULT='success', CONTAINERS_RESULT='success', ENGINES_RESULT='success')
+        successful = dict(ACCEPTANCE_RESULT='success', INTEGRATION_RESULT='success',
+                          CONTAINERS_RESULT='success', ENGINES_RESULT='success')
         cases = [({}, True)]
         for variable in successful:
             cases.extend(({variable: state}, False) for state in
@@ -328,7 +341,7 @@ class QemuWorkflowTests(unittest.TestCase):
                 self.assertNotIn('private-runtime-canary', result.stdout + result.stderr)
 
     def test_full_checks_use_independent_runners_without_artifact_exchange(self):
-        for name in ('acceptance', 'testcontainers', 'engines'):
+        for name in ('acceptance', 'integration', 'testcontainers', 'engines'):
             job = self.ci_job(name)
             self.assertNotIn('    needs:', job)
             self.assertNotRegex(job, re.compile(r'^    if:', re.M))
@@ -337,11 +350,17 @@ class QemuWorkflowTests(unittest.TestCase):
             self.assertIn('scripts/ci-scope.py', job)
         acceptance = self.ci_job('acceptance')
         self.assertIn('scripts/test-acceptance.sh --automated-only --prepare-web', acceptance)
+        self.assertIn('--component source', acceptance)
         self.assertNotIn('npm --prefix web ci', acceptance)
         self.assertNotIn('npx --no-install playwright install', acceptance)
-        self.assertIn('scripts/release-check.sh --acceptance-results "$result"', acceptance)
+        self.assertIn('scripts/release-check.sh --component-results source "$result"', acceptance)
         self.assertNotIn('scripts/test-testcontainers.py', acceptance)
         self.assertNotIn('docker build', acceptance)
+        integration = self.ci_job('integration')
+        self.assertIn('scripts/test-acceptance.sh --automated-only --component integration', integration)
+        self.assertIn('scripts/release-check.sh --component-results integration "$result"', integration)
+        self.assertNotIn('npm ', integration)
+        self.assertNotIn('--prepare-web', integration)
         self.assertIn('scripts/test-testcontainers.py', self.ci_job('testcontainers'))
         engines = self.ci_job('engines')
         self.assertIn('docker build -f deploy/Dockerfile -t cheesetrap:ci .', engines)
@@ -349,7 +368,7 @@ class QemuWorkflowTests(unittest.TestCase):
         self.assertIn('scripts/test-python.py image --image cheesetrap-web:ci', engines)
 
     def test_documentation_scope_cannot_reduce_merge_queue_or_unknown_scope(self):
-        for name, count in [('acceptance', 8), ('testcontainers', 3), ('engines', 2)]:
+        for name, count in [('acceptance', 8), ('integration', 6), ('testcontainers', 3), ('engines', 2)]:
             workflow = self.ci_job(name)
             self.assertIn('scripts/ci-scope.py', workflow)
             blocks = workflow.split('      - ')[1:]
@@ -406,7 +425,7 @@ class QemuWorkflowTests(unittest.TestCase):
         self.assertEqual(triggers.strip(), 'workflow_dispatch:')
         automatic = (ROOT/'.github/workflows/ci.yml').read_text()
         self.assertEqual(re.findall(r'^  ([a-z-]+):$', automatic.split('\njobs:\n', 1)[1], re.M),
-                         ['secrets', 'dependencies', 'acceptance', 'testcontainers', 'engines', 'automated'])
+                         ['secrets', 'dependencies', 'acceptance', 'integration', 'testcontainers', 'engines', 'automated'])
         self.assertNotIn('--privileged', automatic)
         self.assertNotIn('setup-qemu-action', automatic)
         self.assertIn('--execution qemu --timeout 60', workflow)
@@ -436,7 +455,8 @@ class QemuWorkflowTests(unittest.TestCase):
         self.assertIn('--redact=100', automatic)
         self.assertIn('Verify Testcontainers loopback ports and locked Ryuk image', automatic)
         self.assertIn('scripts/test-acceptance.sh --automated-only', automatic)
-        self.assertIn('scripts/release-check.sh --acceptance-results "$result"', automatic)
+        self.assertIn('scripts/release-check.sh --component-results source "$result"', automatic)
+        self.assertIn('scripts/release-check.sh --component-results integration "$result"', automatic)
 
     def test_privileged_guard_rejects_non_hosted_or_non_x64_runners(self):
         workflow = (ROOT/'.github/workflows/arm64-image.yml').read_text()

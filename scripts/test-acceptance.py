@@ -588,6 +588,27 @@ def run_status(rows, commands, automated=False):
     return 'BLOCKED' if any(r['status'] == 'BLOCKED' for r in rows) else 'PASS'
 
 
+def evaluate_component(manifest, suites, component):
+    """Complementary CI gates; neither result represents complete acceptance."""
+    validate_manifest(manifest)
+    if component not in ('source', 'integration'):
+        raise ValueError('unknown acceptance component')
+    owned = {'integration'} if component == 'integration' else {'go', 'e2e'}
+    filtered, outside = [], set()
+    for original in manifest['requirements']:
+        row = dict(original, tests=[test for test in original['tests'] if test['suite'] in owned])
+        if component == 'integration':
+            row.update(browser_tests=[], ui_tests=[])
+        if not row['tests'] and not row.get('browser_tests') and not row.get('ui_tests'):
+            outside.add(row['id'])
+        filtered.append(row)
+    rows = evaluate(dict(manifest, requirements=filtered), suites, {})
+    for row in rows:
+        if row['id'] in outside:
+            row.update(status='OUT_OF_COMPONENT', linux={})
+    return rows
+
+
 def checkout_is_clean(root):
     """Snapshot tracked and untracked inputs before running acceptance commands."""
     status = subprocess.check_output(['git', 'status', '--porcelain', '--untracked-files=all'], cwd=root, text=True)
@@ -606,9 +627,14 @@ def main():
     mode.add_argument('--linux-evidence', type=Path)
     mode.add_argument('--automated-only', action='store_true', help='CI checks only; never asserts full Linux acceptance')
     parser.add_argument('--prepare-web', action='store_true', help='prepare locked web dependencies and Chromium alongside Python regressions (CI only)')
+    parser.add_argument('--component', choices=('source', 'integration'), help='one complementary CI component; never complete acceptance')
     args = parser.parse_args()
     if args.prepare_web and not args.automated_only:
         parser.error('--prepare-web requires --automated-only')
+    if args.component and not args.automated_only:
+        parser.error('--component requires --automated-only')
+    if args.component == 'integration' and args.prepare_web:
+        parser.error('integration component cannot prepare web dependencies')
     install_signal_handlers()
     os.umask(0o077)
     # Match the owned DB harness policy and reject production/test targets.
@@ -638,16 +664,16 @@ def main():
         return record
 
     def abort(error):
-        (out / 'results.json').write_text(json.dumps({'schema': 1, 'revision': revision, 'checkout_clean': checkout_clean, 'tracked_diff_sha256': hashlib.sha256(diff).hexdigest(), 'started_at': stamp, 'status': 'FAIL', 'aborted': True, 'prepare_web': args.prepare_web, 'reason': str(error), 'commands': commands}, indent=2) + '\n')
+        (out / 'results.json').write_text(json.dumps({'schema': 1, 'revision': revision, 'checkout_clean': checkout_clean, 'tracked_diff_sha256': hashlib.sha256(diff).hexdigest(), 'started_at': stamp, 'status': 'FAIL', 'aborted': True, 'component': args.component, 'prepare_web': args.prepare_web, 'reason': str(error), 'commands': commands}, indent=2) + '\n')
         print_public_summary(commands)
 
-    def run(name, command, cwd=ROOT, timeout=1200, report=None):
+    def run(name, command, cwd=ROOT, timeout=1200, report=None, childenv=None):
         print('Running ' + name, flush=True)
         log = out / (name + '.log')
         record = record_for(name, command, cwd, timeout, report)
         record['process_status'] = 'exited'
         try:
-            code = run_command(command, cwd=cwd, env=env, log=log, timeout=timeout)
+            code = run_command(command, cwd=cwd, env=env if childenv is None else childenv, log=log, timeout=timeout)
         except (AcceptanceInterrupted, AcceptanceTimeout) as error:
             record.update(reason=str(error), process_status='interrupted' if isinstance(error, AcceptanceInterrupted) else 'timed_out')
             abort(error)
@@ -657,86 +683,98 @@ def main():
             record['process_status'] = 'start_failed'
         record.update(status='PASS' if code == 0 else 'FAIL', returncode=code)
         return code, log.read_text(errors='replace') if name != 'ui' and log.exists() else ''
-    # Keep source tests ahead of DB work: overlapping their Go subprocesses
-    # prolonged integration on the measured runner. Their flags stay unchanged.
-    if args.prepare_web:
-        runner_tests = record_for('runner-tests', ['python3', '-B', 'scripts/test-python.py', 'regression'])
-        web_prepare = record_for('web-prepare', ['./scripts/prepare-ci-web.sh'])
+    if args.component != 'integration':
+        # Keep source tests ahead of DB work: overlapping their Go subprocesses
+        # prolonged integration on the measured runner. Their flags stay unchanged.
+        if args.prepare_web:
+            runner_tests = record_for('runner-tests', ['python3', '-B', 'scripts/test-python.py', 'regression'])
+            web_prepare = record_for('web-prepare', ['./scripts/prepare-ci-web.sh'])
+            try:
+                run_independent([[runner_tests], [web_prepare]], env=env)
+                if web_prepare['status'] != 'PASS':
+                    # E2E also installs dependencies. Never retry a failed setup by
+                    # continuing to that independently usable local harness.
+                    raise ValueError('web preparation failed; acceptance stopped before E2E')
+            except (AcceptanceInterrupted, AcceptanceTimeout, ValueError) as error:
+                abort(error)
+                raise
+        else:
+            run('runner-tests', ['python3', '-B', 'scripts/test-python.py', 'regression'])
+        code, output = run('go', ['go', 'test', './...', '-count=1', '-json'])
+        suites['go'], errors = go_results(output)
+        if errors: commands[-1]['status'] = 'FAIL'
+        run('vet', ['go', 'vet', './...'])
+        if args.component == 'source':
+            sqlc = json.loads((ROOT / 'deploy/toolchain.lock.json').read_text())['sqlc']
+            run('sql-prepare', ['go', 'run', '-p=1', 'github.com/sqlc-dev/sqlc/cmd/sqlc@v' + sqlc, 'version'],
+                childenv=dict(env, GOMAXPROCS='1'))
+    if args.component != 'source':
+        if args.component == 'integration':
+            run('integration', ['./scripts/test-integration.sh', './...'])
+            integration = commands[-1]
+        else:
+            sqlc = json.loads((ROOT / 'deploy/toolchain.lock.json').read_text())['sqlc']
+            # Go caches the pinned tool executable. Compile it without generating any
+            # source while integration runs; the original generation/drift gate follows.
+            sql_prepare = record_for('sql-prepare', ['go', 'run', '-p=1', 'github.com/sqlc-dev/sqlc/cmd/sqlc@v' + sqlc, 'version'])
+            integration = record_for('integration', ['./scripts/test-integration.sh', './...'])
+            try:
+                run_independent([[integration], [sql_prepare]], env=env)
+            except (AcceptanceInterrupted, AcceptanceTimeout) as error:
+                abort(error)
+                raise
         try:
-            run_independent([[runner_tests], [web_prepare]], env=env)
-            if web_prepare['status'] != 'PASS':
-                # E2E also installs dependencies. Never retry a failed setup by
-                # continuing to that independently usable local harness.
-                raise ValueError('web preparation failed; acceptance stopped before E2E')
-        except (AcceptanceInterrupted, AcceptanceTimeout, ValueError) as error:
-            abort(error)
-            raise
-    else:
-        run('runner-tests', ['python3', '-B', 'scripts/test-python.py', 'regression'])
-    code, output = run('go', ['go', 'test', './...', '-count=1', '-json'])
-    suites['go'], errors = go_results(output)
-    if errors: commands[-1]['status'] = 'FAIL'
-    run('vet', ['go', 'vet', './...'])
-    sqlc = json.loads((ROOT / 'deploy/toolchain.lock.json').read_text())['sqlc']
-    # Go caches the pinned tool executable. Compile it without generating any
-    # source while integration runs; the original generation/drift gate follows.
-    sql_prepare = record_for('sql-prepare', ['go', 'run', '-p=1', 'github.com/sqlc-dev/sqlc/cmd/sqlc@v' + sqlc, 'version'])
-    integration = record_for('integration', ['./scripts/test-integration.sh', './...'])
-    try:
-        run_independent([[integration], [sql_prepare]], env=env)
-    except (AcceptanceInterrupted, AcceptanceTimeout) as error:
-        abort(error)
-        raise
-    try:
-        output = (ROOT / integration['log']).read_text(errors='replace')
-        suites['integration'], logs = harness_results(output, integration['returncode'], 4)
-        integration['test_logs'] = logs
-    except (ValueError, OSError):
-        integration['status'] = 'FAIL'
-    # E2E creates a DB and rebuilds the embedded UI. Generators also mutate Go
-    # inputs, so none of that work may overlap the source-only lanes above.
-    browser_json = ROOT / '.local/e2e/browser-results.json'
-    browser_json.unlink(missing_ok=True)
-    code, output = run('e2e', ['./scripts/test-e2e.sh'])
-    try:
-        suites['e2e'], logs = harness_results(output, code, 1)
-        commands[-1]['test_logs'] = logs
-        if len(logs) == 1: commands[-1]['test_log'] = logs[0]
-    except (ValueError, OSError):
-        commands[-1]['status'] = 'FAIL'
-    try:
-        suites['browser'] = browser_results(json.loads(browser_json.read_text()))
-        preserved = out / 'browser.json'
-        shutil.copyfile(browser_json, preserved)
-        commands[-1]['browser_log'] = str(preserved.relative_to(ROOT))
-    except (ValueError, OSError, KeyError): commands[-1]['status'] = 'FAIL'
-    ui_json = out / 'ui.json'
-    code, _ = run('ui', ['npm', 'run', 'test', '--', '--run', '--includeTaskLocation', '--reporter=json', '--outputFile=' + str(ui_json)], ROOT / 'web', report=ui_json)
-    suites['ui'], diagnostics = ui_check(ui_json, code, {}, commands[-1]['process_status'])
-    if diagnostics['categories']: commands[-1]['status'] = 'FAIL'
-    run('ui-build', ['npm', 'run', 'build'], ROOT / 'web')
-    before = generated_snapshot()
-    run('api-schema', ['go', 'run', './cmd/cheesetrap', 'api-schema', '--out', 'api/openapi.json'])
-    run('api-types', ['npm', 'run', 'generate:api'], ROOT / 'web')
-    run('api-contract', ['npm', 'run', 'test:api'], ROOT / 'web')
-    run('sql-schema', ['./scripts/generate-sql.sh'])
-    after = generated_snapshot()
-    changed = sorted(path for path in before.keys() | after.keys() if before.get(path) != after.get(path))
-    commands.append({'name': 'generated-clean', 'status': 'FAIL' if changed else 'PASS', 'changed': changed})
+            output = (ROOT / integration['log']).read_text(errors='replace')
+            suites['integration'], logs = harness_results(output, integration['returncode'], 4)
+            integration['test_logs'] = logs
+        except (ValueError, OSError):
+            integration['status'] = 'FAIL'
+    if args.component != 'integration':
+        # E2E creates a DB and rebuilds the embedded UI. Generators also mutate Go
+        # inputs, so none of that work may overlap the source-only lanes above.
+        browser_json = ROOT / '.local/e2e/browser-results.json'
+        browser_json.unlink(missing_ok=True)
+        code, output = run('e2e', ['./scripts/test-e2e.sh'])
+        try:
+            suites['e2e'], logs = harness_results(output, code, 1)
+            commands[-1]['test_logs'] = logs
+            if len(logs) == 1: commands[-1]['test_log'] = logs[0]
+        except (ValueError, OSError):
+            commands[-1]['status'] = 'FAIL'
+        try:
+            suites['browser'] = browser_results(json.loads(browser_json.read_text()))
+            preserved = out / 'browser.json'
+            shutil.copyfile(browser_json, preserved)
+            commands[-1]['browser_log'] = str(preserved.relative_to(ROOT))
+        except (ValueError, OSError, KeyError): commands[-1]['status'] = 'FAIL'
+        ui_json = out / 'ui.json'
+        code, _ = run('ui', ['npm', 'run', 'test', '--', '--run', '--includeTaskLocation', '--reporter=json', '--outputFile=' + str(ui_json)], ROOT / 'web', report=ui_json)
+        suites['ui'], diagnostics = ui_check(ui_json, code, {}, commands[-1]['process_status'])
+        if diagnostics['categories']: commands[-1]['status'] = 'FAIL'
+        run('ui-build', ['npm', 'run', 'build'], ROOT / 'web')
+        before = generated_snapshot()
+        run('api-schema', ['go', 'run', './cmd/cheesetrap', 'api-schema', '--out', 'api/openapi.json'])
+        run('api-types', ['npm', 'run', 'generate:api'], ROOT / 'web')
+        run('api-contract', ['npm', 'run', 'test:api'], ROOT / 'web')
+        run('sql-schema', ['./scripts/generate-sql.sh'])
+        after = generated_snapshot()
+        changed = sorted(path for path in before.keys() | after.keys() if before.get(path) != after.get(path))
+        commands.append({'name': 'generated-clean', 'status': 'FAIL' if changed else 'PASS', 'changed': changed})
     linux, linux_error = {}, None
     if args.linux_evidence:
         try: linux = linux_results(json.loads(args.linux_evidence.read_text()), args.linux_evidence.resolve().parent, revision)
         except (ValueError, OSError, KeyError) as error: linux_error = str(error)
-    rows = evaluate(manifest, suites, linux)
+    rows = evaluate_component(manifest, suites, args.component) if args.component else evaluate(manifest, suites, linux)
     status = 'FAIL' if linux_error else run_status(rows, commands, args.automated_only)
+    if args.component and status == 'PASS_AUTOMATED': status = 'PASS_COMPONENT'
     report = {'schema': 1, 'revision': revision, 'source_sha256': source_hashes, 'tracked_diff_sha256': hashlib.sha256(diff).hexdigest(), 'checkout_clean': checkout_clean, 'started_at': stamp, 'status': status,
               'environment': {'os': platform.system(), 'release': platform.release(), 'machine': platform.machine(), 'python': platform.python_version()},
               'commands': commands, 'tests': {suite: [dict(package=p, name=n) for p, n in sorted(tests)] for suite, tests in suites.items()},
-              'requirements': rows, 'linux_error': linux_error, 'prepare_web': args.prepare_web}
+              'requirements': rows, 'linux_error': linux_error, 'prepare_web': args.prepare_web, 'component': args.component}
     (out / 'results.json').write_text(json.dumps(report, indent=2) + '\n')
     print_public_summary(commands)
     print(f'{status}: {out.relative_to(ROOT)}/results.json')
-    return 0 if status in ('PASS', 'PASS_AUTOMATED') else 2 if status == 'BLOCKED' else 1
+    return 0 if status in ('PASS', 'PASS_AUTOMATED', 'PASS_COMPONENT') else 2 if status == 'BLOCKED' else 1
 
 if __name__ == '__main__':
     try: sys.exit(main())

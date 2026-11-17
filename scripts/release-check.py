@@ -25,6 +25,10 @@ REQUIRED = (
 IMAGE_FILES = ('deploy/Dockerfile', 'deploy/compose.yaml', 'deploy/compose.external-db.yaml', 'deploy/test.compose.yaml', 'sensors/web/Dockerfile')
 ACCEPTANCE_COMMANDS = ('runner-tests', 'go', 'vet', 'sql-prepare', 'integration', 'e2e', 'ui', 'ui-build',
                        'api-schema', 'api-types', 'api-contract', 'sql-schema', 'generated-clean')
+COMPONENT_COMMANDS = {
+    'source': tuple(name for name in ACCEPTANCE_COMMANDS if name != 'integration'),
+    'integration': ('integration',),
+}
 
 
 def require(condition, reason):
@@ -162,22 +166,50 @@ def validate_metadata(root):
     require(len(coverage.get('requirements', [])) == 13 and {row['id'] for row in coverage['requirements']} == {f'T{i:02}' for i in range(1, 14)}, 'acceptance coverage missing T01–T13')
 
 
-def validate_acceptance(result, revision, sources):
-    require(result.get('schema') == 1 and result.get('status') in ('PASS', 'PASS_AUTOMATED'), 'acceptance result did not pass')
+def validate_identity(result, revision, sources):
     require(result.get('revision') == revision, 'acceptance revision is stale')
     require(result.get('tracked_diff_sha256') == hashlib.sha256(b'').hexdigest(), 'acceptance began with a nonempty or unknown tracked diff')
     require(result.get('checkout_clean') is True, 'acceptance did not begin from a clean checkout')
     require(bool(sources) and result.get('source_sha256') == sources, 'acceptance production sources are stale')
+
+
+def validate_commands(result, expected, allow_web=True):
     prepare_web = result.get('prepare_web', False)
     require(type(prepare_web) is bool, 'acceptance web preparation mode must be boolean')
-    expected_commands = set(ACCEPTANCE_COMMANDS) | ({'web-prepare'} if prepare_web else set())
+    require(allow_web or not prepare_web, 'integration component cannot prepare web dependencies')
+    expected_commands = set(expected) | ({'web-prepare'} if prepare_web else set())
     commands = result.get('commands', [])
     require(len(commands) == len(expected_commands) and {c.get('name') for c in commands} == expected_commands
             and all(c.get('status') == 'PASS' for c in commands), 'acceptance commands incomplete or failed')
+
+
+def validate_requirements(result, outside=()):
     rows = result.get('requirements', [])
     require(len(rows) == 13 and {r.get('id') for r in rows} == {f'T{i:02}' for i in range(1, 14)}
-            and all(r.get('status') in ('PASS', 'BLOCKED') and r.get('missing_tests') == [] for r in rows),
+            and all(r.get('status') in (('OUT_OF_COMPONENT',) if r.get('id') in outside else ('PASS', 'BLOCKED'))
+                    and r.get('missing_tests') == [] for r in rows),
             'acceptance requirements incomplete or failed')
+
+
+def validate_acceptance(result, revision, sources):
+    require(result.get('schema') == 1 and result.get('status') in ('PASS', 'PASS_AUTOMATED'), 'acceptance result did not pass')
+    require(result.get('component') is None, 'component result is not complete acceptance')
+    validate_identity(result, revision, sources)
+    validate_commands(result, ACCEPTANCE_COMMANDS)
+    validate_requirements(result)
+
+
+def validate_component(result, revision, sources, component, manifest):
+    require(component in COMPONENT_COMMANDS and result.get('component') == component,
+            'unknown or mismatched acceptance component')
+    require(result.get('schema') == 1 and result.get('status') == 'PASS_COMPONENT', 'component result did not pass')
+    validate_identity(result, revision, sources)
+    validate_commands(result, COMPONENT_COMMANDS[component], allow_web=component == 'source')
+    owned = {'integration'} if component == 'integration' else {'go', 'e2e'}
+    outside = {r['id'] for r in manifest['requirements']
+               if not any(t['suite'] in owned for t in r['tests'])
+               and not (component == 'source' and (r.get('browser_tests') or r.get('ui_tests')))}
+    validate_requirements(result, outside)
 
 
 def validate_clean_checkout(root):
@@ -190,19 +222,30 @@ def main():
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument('--metadata-only', action='store_true', help='static checks only; not release readiness')
     mode.add_argument('--acceptance-results', type=Path, help='current private test-acceptance results.json')
+    mode.add_argument('--component-results', nargs=2, metavar=('COMPONENT', 'FILE'), help='validate one explicit CI component; never complete acceptance')
     args = parser.parse_args()
+    component = args.component_results[0] if args.component_results else None
+    if args.component_results and component not in COMPONENT_COMMANDS:
+        parser.error('component must be source or integration')
     validate_metadata(ROOT)
     if args.metadata_only:
         print('PASS_METADATA: documents, licenses, locks and acceptance coverage; no build/live-test claim')
         return
     validate_clean_checkout(ROOT)
-    result = json.loads(args.acceptance_results.read_text())
+    path = Path(args.component_results[1]) if args.component_results else args.acceptance_results
+    result = json.loads(path.read_text())
     spec = importlib.util.spec_from_file_location('acceptance', ROOT / 'scripts/test-acceptance.py')
     acceptance = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(acceptance)
     revision = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip()
-    validate_acceptance(result, revision, acceptance.production_sources())
-    print('PASS_AUTOMATED_GATE: current automated result + metadata; historical Linux/load scopes remain separate; image build requires release record')
+    if component:
+        manifest = read_json(ROOT, 'tests/acceptance/coverage.json')
+        acceptance.validate_manifest(manifest)
+        validate_component(result, revision, acceptance.production_sources(), component, manifest)
+        print('PASS_COMPONENT_GATE: ' + component + '; complete CI requires both components, Testcontainers and engines')
+    else:
+        validate_acceptance(result, revision, acceptance.production_sources())
+        print('PASS_AUTOMATED_GATE: current automated result + metadata; historical Linux/load scopes remain separate; image build requires release record')
 
 
 if __name__ == '__main__':
