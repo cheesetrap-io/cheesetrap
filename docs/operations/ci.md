@@ -7,11 +7,20 @@ and its queued candidate's checks are separate results.
 
 ## Which checks run
 
-Secret scanning and dependency auditing run for every PR. The `automated` job
-uses a documentation scope only when the complete PR diff contains regular
+Secret scanning and dependency auditing run for every PR. The `acceptance`,
+`testcontainers`, and `engines` jobs run independently on separate runners.
+Each resolves the complete PR diff and uses a documentation scope only for regular
 Markdown files under `docs/` or root `README.md`/`CONTRIBUTING.md`. `AGENTS.md`
 and unusual paths are excluded. This scope runs operation-doc regressions,
-relative links and release metadata; it does not claim `PASS_AUTOMATED`.
+relative links and release metadata in `acceptance`; the other jobs report the
+reduced scope without building images or creating databases. This scope does not
+claim `PASS_AUTOMATED`.
+
+The required `automated` check waits for all three jobs and runs its verdict even
+after an upstream failure or cancellation. It accepts only three successful job
+results. A failed, cancelled, skipped, missing or unknown result fails the verdict.
+Documentation jobs still execute their scope selection; they are not skipped jobs.
+The jobs exchange status results, never private evidence artifacts.
 
 Any code, configuration, lockfile, instruction, non-regular file, empty diff or
 unknown comparison selects the full suite. Deletions and both sides of renames
@@ -30,8 +39,15 @@ limits.
 
 The `Determine verification scope` step prints a fixed result such as
 `CI_SCOPE docs documentation_only` or `CI_SCOPE full non_documentation_change`.
-The job summary identifies which scope was selected. A short documentation
+Each work job's summary identifies its scope. A short documentation
 result is not evidence that the full automated suite ran.
+
+| Job | Full-scope result to inspect |
+| --- | --- |
+| `acceptance` | Python, Go, disposable DB, browser, UI and generated-code checks; current `PASS_AUTOMATED_GATE` |
+| `testcontainers` | Live loopback, pinned-image, reaper and independent-cleanup regressions |
+| `engines` | Both pinned image builds and `PASS_PYTHON_IMAGE` |
+| `automated` | `CI_VERDICT PASS` only after all three work jobs succeed |
 
 For a local documentation check, run:
 

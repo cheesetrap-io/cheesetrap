@@ -73,7 +73,7 @@ jobs:
           for arch in amd64 arm64; do
             GOOS=linux GOARCH="$arch" "$GOBIN/govulncheck" ./...
           done
-  automated:
+  acceptance:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
@@ -122,9 +122,6 @@ jobs:
           npm --prefix web ci --no-audit --no-fund
           cd web
           npx --no-install playwright install --with-deps chromium
-      - name: Verify Testcontainers loopback ports and locked Ryuk image
-        if: ${{ github.event_name != 'pull_request' || steps.scope.outputs.scope != 'docs' }}
-        run: python3 -B scripts/test-testcontainers.py
       - name: Offline unit, disposable DB integration and UI acceptance
         if: ${{ github.event_name != 'pull_request' || steps.scope.outputs.scope != 'docs' }}
         run: scripts/test-acceptance.sh --automated-only
@@ -133,6 +130,72 @@ jobs:
         run: |
           result=$(python3 -c 'from pathlib import Path; print(max(Path(".local/acceptance").glob("*/results.json")))')
           scripts/release-check.sh --acceptance-results "$result"
+      - name: Explain external gates
+        if: always()
+        env:
+          CI_EVENT: ${{ github.event_name }}
+          CI_SCOPE: ${{ steps.scope.outputs.scope }}
+        run: |
+          if [ "$CI_EVENT" = pull_request ] && [ "$CI_SCOPE" = docs ]; then
+            echo 'Documentation-only PR scope: runbook regressions, links and release metadata. Secret and dependency checks remain required. This is not PASS_AUTOMATED; the merge queue must run the complete suite before merge.' >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo 'Full acceptance: PASS_AUTOMATED covers general Python regressions, offline fixtures, disposable DB and UI. The required automated verdict also waits for the independent Testcontainers and image/engine jobs. Actual Linux network and load verification remains a separate release step. Private logs are never uploaded.' >> "$GITHUB_STEP_SUMMARY"
+          fi
+  testcontainers:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      GOTOOLCHAIN: local
+      GOENV: 'off'
+      GOWORK: 'off'
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Determine verification scope
+        id: scope
+        env:
+          CI_EVENT: ${{ github.event_name }}
+          CI_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          CI_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: python3 -B scripts/ci-scope.py --event "$CI_EVENT" --base "$CI_BASE_SHA" --head "$CI_HEAD_SHA" --fetch-missing
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        if: ${{ github.event_name != 'pull_request' || steps.scope.outputs.scope != 'docs' }}
+        with:
+          go-version: '1.27.4'
+      - name: Prepare locked Go dependencies
+        if: ${{ github.event_name != 'pull_request' || steps.scope.outputs.scope != 'docs' }}
+        run: |
+          go mod download
+          go mod verify
+      - name: Verify Testcontainers loopback ports and locked Ryuk image
+        if: ${{ github.event_name != 'pull_request' || steps.scope.outputs.scope != 'docs' }}
+        run: python3 -B scripts/test-testcontainers.py
+      - name: Explain external gates
+        if: always()
+        env:
+          CI_EVENT: ${{ github.event_name }}
+          CI_SCOPE: ${{ steps.scope.outputs.scope }}
+        run: |
+          if [ "$CI_EVENT" = pull_request ] && [ "$CI_SCOPE" = docs ]; then
+            echo 'Documentation-only PR scope: live Testcontainers verification runs on the full merge-queue candidate.' >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo 'Live Testcontainers checks remain required by the automated verdict. Each runner uses its own disposable Docker resources.' >> "$GITHUB_STEP_SUMMARY"
+          fi
+  engines:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Determine verification scope
+        id: scope
+        env:
+          CI_EVENT: ${{ github.event_name }}
+          CI_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          CI_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: python3 -B scripts/ci-scope.py --event "$CI_EVENT" --base "$CI_BASE_SHA" --head "$CI_HEAD_SHA" --fetch-missing
       - name: Build pinned images
         if: ${{ github.event_name != 'pull_request' || steps.scope.outputs.scope != 'docs' }}
         run: |
@@ -149,7 +212,25 @@ jobs:
           CI_SCOPE: ${{ steps.scope.outputs.scope }}
         run: |
           if [ "$CI_EVENT" = pull_request ] && [ "$CI_SCOPE" = docs ]; then
-            echo 'Documentation-only PR scope: runbook regressions, links and release metadata. Secret and dependency checks remain required. This is not PASS_AUTOMATED; the merge queue must run the complete suite before merge.' >> "$GITHUB_STEP_SUMMARY"
+            echo 'Documentation-only PR scope: image builds and engine checks run on the full merge-queue candidate.' >> "$GITHUB_STEP_SUMMARY"
           else
-            echo 'Full-suite scope: PASS_AUTOMATED covers general Python regressions, offline fixtures, disposable DB and UI. Engine Python boundaries and reactor remain required after image build. Actual Linux network and load verification is a separately scoped release step. Private logs are never uploaded.' >> "$GITHUB_STEP_SUMMARY"
+            echo 'Both pinned image builds and Python engine boundaries/reactor checks remain required by the automated verdict. Private logs are never uploaded.' >> "$GITHUB_STEP_SUMMARY"
           fi
+  automated:
+    needs: [acceptance, testcontainers, engines]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require all automated work
+        env:
+          ACCEPTANCE_RESULT: ${{ needs.acceptance.result }}
+          CONTAINERS_RESULT: ${{ needs.testcontainers.result }}
+          ENGINES_RESULT: ${{ needs.engines.result }}
+        run: |
+          set -euo pipefail
+          if [ "$ACCEPTANCE_RESULT" != success ] || [ "$CONTAINERS_RESULT" != success ] || [ "$ENGINES_RESULT" != success ]; then
+            echo 'CI_VERDICT FAIL'
+            exit 1
+          fi
+          echo 'CI_VERDICT PASS'
