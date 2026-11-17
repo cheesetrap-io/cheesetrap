@@ -41,7 +41,9 @@ CI runs source (`--automated-only --prepare-web --component source`), browser
 (`--automated-only --prepare-web --component browser`), and complete Go integration
 (`--automated-only --component integration`) components on separate runners.
 Source checks overlap locked npm preparation with Python regressions, then run Go
-unit/vet, UI, SQL/OpenAPI generation and drift checks. Browser installs the Chromium
+unit/vet. Pinned SQL compiler preparation overlaps UI tests, keeping its existing
+single-CPU Go settings. Both finish before UI build, SQL/OpenAPI generation and
+drift checks. Browser installs the Chromium
 headless shell and required OS libraries, then runs the existing Go E2E and browser
 harness. Failed browser preparation stops before another E2E install. Integration
 runs every existing test across six required CI shards on separate runners. Each

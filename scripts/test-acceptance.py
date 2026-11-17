@@ -723,10 +723,6 @@ def main():
         suites['go'], errors = go_results(output)
         if errors: commands[-1]['status'] = 'FAIL'
         run('vet', ['go', 'vet', './...'])
-        if args.component == 'source':
-            sqlc = json.loads((ROOT / 'deploy/toolchain.lock.json').read_text())['sqlc']
-            run('sql-prepare', ['go', 'run', '-p=1', 'github.com/sqlc-dev/sqlc/cmd/sqlc@v' + sqlc, 'version'],
-                childenv=dict(env, GOMAXPROCS='1'))
     if args.component == 'browser' and args.prepare_web:
         code, _ = run('web-prepare', ['./scripts/prepare-ci-web.sh'], childenv=dict(env, GOMAXPROCS='1'))
         if code != 0:
@@ -777,9 +773,24 @@ def main():
         except (ValueError, OSError, KeyError): commands[-1]['status'] = 'FAIL'
     if args.component in (None, 'source'):
         ui_json = out / 'ui.json'
-        code, _ = run('ui', ['npm', 'run', 'test', '--', '--run', '--includeTaskLocation', '--reporter=json', '--outputFile=' + str(ui_json)], ROOT / 'web', report=ui_json)
-        suites['ui'], diagnostics = ui_check(ui_json, code, {}, commands[-1]['process_status'])
-        if diagnostics['categories']: commands[-1]['status'] = 'FAIL'
+        ui_command = ['npm', 'run', 'test', '--', '--run', '--includeTaskLocation', '--reporter=json', '--outputFile=' + str(ui_json)]
+        if args.component == 'source':
+            # Preparing the pinned SQL tool does not generate source. Join it
+            # with UI tests before any build or generator can change inputs.
+            sqlc = json.loads((ROOT / 'deploy/toolchain.lock.json').read_text())['sqlc']
+            sql_prepare = record_for('sql-prepare', ['go', 'run', '-p=1', 'github.com/sqlc-dev/sqlc/cmd/sqlc@v' + sqlc, 'version'])
+            ui = record_for('ui', ui_command, ROOT / 'web', report=ui_json)
+            try:
+                run_independent([[ui], [sql_prepare]], env=env)
+            except (AcceptanceInterrupted, AcceptanceTimeout) as error:
+                abort(error)
+                raise
+            code = ui['returncode']
+        else:
+            code, _ = run('ui', ui_command, ROOT / 'web', report=ui_json)
+            ui = commands[-1]
+        suites['ui'], diagnostics = ui_check(ui_json, code, {}, ui['process_status'])
+        if diagnostics['categories']: ui['status'] = 'FAIL'
         run('ui-build', ['npm', 'run', 'build'], ROOT / 'web')
         before = generated_snapshot()
         run('api-schema', ['go', 'run', './cmd/cheesetrap', 'api-schema', '--out', 'api/openapi.json'])

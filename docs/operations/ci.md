@@ -24,7 +24,11 @@ The jobs exchange status results, never private evidence artifacts.
 
 The source component prepares locked npm dependencies alongside Python regressions,
 joining both before Go tests. It uses `prepare-ci-web.sh --dependencies-only`
-because source tests do not need Chromium. The browser component prepares locked
+because source tests do not need Chromium. After Go unit/vet, the pinned SQL
+compiler prepares alongside UI tests with its existing `-p=1` and `GOMAXPROCS=1`.
+Both results are required before the UI build and source generators; a failed
+compiler process, UI process, or missing/invalid UI report remains a failure.
+The browser component prepares locked
 npm dependencies, Chromium's headless shell and system libraries before the
 existing isolated Go E2E/browser harness. Setup is a required command in each private result. A failed
 setup stops before another install. Cancellation stops owned process groups and

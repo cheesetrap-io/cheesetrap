@@ -76,7 +76,7 @@ if name==os.environ.get('FAIL'): sys.exit(9)
                         connections.append(connection)
                         connection.recv(100)
                     for connection in connections: connection.sendall(b'run')
-                    for _ in range(2):
+                    for _ in range(sum(map(len, self.groups)) - 2):
                         connection, _ = server.accept()
                         connections.append(connection)
                         connection.recv(100)
@@ -97,7 +97,7 @@ if name==os.environ.get('FAIL'): sys.exit(9)
         active, peak, started = set(), 0, []
         for action, name, flags, cpu in map(json.loads, (self.root/'events').read_text().splitlines()):
             self.assertEqual(flags, ['--keep'])
-            self.assertEqual(cpu, None if name == 'integration' else '1',
+            self.assertEqual(cpu, None if name in {r['name'] for r in self.groups[0]} else '1',
                              'background compiler preparation must leave CPUs for integration')
             if action == 'start':
                 started.append(name)
@@ -106,7 +106,7 @@ if name==os.environ.get('FAIL'): sys.exit(9)
             else: active.remove(name)
         self.assertEqual(peak, 2)
         self.assertEqual(active, set())
-        self.assertCountEqual(started, ['integration', 'runner-tests', 'go', 'vet'])
+        self.assertCountEqual(started, [r['name'] for r in rows])
         for row in rows:
             self.assertIn('private output '+row['name'], Path(row['log']).read_text())
         return rows
@@ -119,6 +119,13 @@ if name==os.environ.get('FAIL'): sys.exit(9)
         rows = self.exercise(fail='runner-tests')
         failed = next(row for row in rows if row['name'] == 'runner-tests')
         self.assertEqual((failed['status'], failed['returncode']), ('FAIL', 9))
+        self.assertEqual(RUNNER.run_status([], rows, automated=True), 'FAIL')
+
+    def test_sql_preparation_failure_joins_the_overlapping_ui_process(self):
+        self.groups = [[self.check('ui')], [self.check('sql-prepare')]]
+        rows = self.exercise(fail='sql-prepare')
+        self.assertEqual([(row['name'], row['status'], row['returncode']) for row in rows],
+                         [('ui', 'PASS', 0), ('sql-prepare', 'FAIL', 9)])
         self.assertEqual(RUNNER.run_status([], rows, automated=True), 'FAIL')
 
     def test_empty_groups_cannot_succeed(self):
