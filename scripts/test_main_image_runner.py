@@ -248,19 +248,70 @@ class MergeQueuePolicyTests(unittest.TestCase):
 
 
 class QemuWorkflowTests(unittest.TestCase):
+    def ci_job(self, name):
+        workflow = (ROOT/'.github/workflows/ci.yml').read_text()
+        match = re.search(r'^  ' + re.escape(name) + r':\n(.*?)(?=^  [a-z-]+:\n|\Z)',
+                          workflow.split('\njobs:\n', 1)[1], re.M | re.S)
+        self.assertIsNotNone(match, name + ' must report a separate job result')
+        return match.group(1)
+
+    def test_required_verdict_runs_after_every_independent_job_even_on_failure(self):
+        verdict = self.ci_job('automated')
+        self.assertIn('needs: [acceptance, testcontainers, engines]', verdict)
+        self.assertIn('if: always()', verdict)
+        self.assertNotIn("contains(needs.*.result, 'failure')", verdict)
+        self.assertIn('Require all automated work', verdict)
+        for variable, job in [('ACCEPTANCE_RESULT', 'acceptance'),
+                              ('CONTAINERS_RESULT', 'testcontainers'), ('ENGINES_RESULT', 'engines')]:
+            self.assertIn(variable + ': ${{ needs.' + job + '.result }}', verdict)
+        script = textwrap.dedent(verdict.split('run: |\n', 1)[1])
+        successful = dict(ACCEPTANCE_RESULT='success', CONTAINERS_RESULT='success', ENGINES_RESULT='success')
+        cases = [({}, True)]
+        for variable in successful:
+            cases.extend(({variable: state}, False) for state in
+                         ('failure', 'cancelled', 'skipped', '', 'private-runtime-canary'))
+        cases.append((dict.fromkeys(successful, 'skipped'), False))
+        for overrides, accepted in cases:
+            with self.subTest(overrides=overrides):
+                result = subprocess.run(['bash', '-c', script], capture_output=True, text=True, timeout=5,
+                                        env=dict(PATH=os.environ['PATH'], **(successful | overrides)))
+                self.assertEqual(result.returncode == 0, accepted, result.stdout + result.stderr)
+                self.assertNotIn('private-runtime-canary', result.stdout + result.stderr)
+
+    def test_full_checks_use_independent_runners_without_artifact_exchange(self):
+        for name in ('acceptance', 'testcontainers', 'engines'):
+            job = self.ci_job(name)
+            self.assertNotIn('    needs:', job)
+            self.assertNotRegex(job, re.compile(r'^    if:', re.M))
+            self.assertIn('runs-on: ubuntu-24.04', job)
+            self.assertIn('timeout-minutes: 45', job)
+            self.assertIn('scripts/ci-scope.py', job)
+        acceptance = self.ci_job('acceptance')
+        self.assertIn('scripts/test-acceptance.sh --automated-only', acceptance)
+        self.assertIn('scripts/release-check.sh --acceptance-results "$result"', acceptance)
+        self.assertNotIn('scripts/test-testcontainers.py', acceptance)
+        self.assertNotIn('docker build', acceptance)
+        self.assertIn('scripts/test-testcontainers.py', self.ci_job('testcontainers'))
+        engines = self.ci_job('engines')
+        self.assertIn('docker build -f deploy/Dockerfile -t cheesetrap:ci .', engines)
+        self.assertIn('docker build --target patched -t cheesetrap-web:ci sensors/web', engines)
+        self.assertIn('scripts/test-python.py image --image cheesetrap-web:ci', engines)
+
     def test_documentation_scope_cannot_reduce_merge_queue_or_unknown_scope(self):
-        workflow = (ROOT/'.github/workflows/ci.yml').read_text().split('\n  automated:\n', 1)[1]
-        self.assertIn('scripts/ci-scope.py', workflow)
-        blocks = workflow.split('      - ')[1:]
-        guarded = []
-        for block in blocks:
-            if any(marker in block for marker in ('actions/checkout@', 'id: scope',
-                                                   'Check documentation PR', 'Explain external gates')):
-                continue
-            self.assertIn("if: ${{ github.event_name != 'pull_request' || steps.scope.outputs.scope != 'docs' }}", block)
-            guarded.append(block)
-        self.assertEqual(len(guarded), 9, 'every original full-suite setup/check must retain its queue guard')
-        self.assertIn("if: ${{ github.event_name == 'pull_request' && steps.scope.outputs.scope == 'docs' }}", workflow)
+        for name, count in [('acceptance', 6), ('testcontainers', 3), ('engines', 2)]:
+            workflow = self.ci_job(name)
+            self.assertIn('scripts/ci-scope.py', workflow)
+            blocks = workflow.split('      - ')[1:]
+            guarded = []
+            for block in blocks:
+                if any(marker in block for marker in ('actions/checkout@', 'id: scope',
+                                                       'Check documentation PR', 'Explain external gates')):
+                    continue
+                self.assertIn("if: ${{ github.event_name != 'pull_request' || steps.scope.outputs.scope != 'docs' }}", block)
+                guarded.append(block)
+            self.assertEqual(len(guarded), count, 'every full-suite step must retain its queue guard')
+        self.assertIn("if: ${{ github.event_name == 'pull_request' && steps.scope.outputs.scope == 'docs' }}",
+                      self.ci_job('acceptance'))
 
     def test_merge_queue_runs_the_full_automatic_suite_without_cancellation(self):
         workflow = (ROOT/'.github/workflows/ci.yml').read_text()
@@ -270,7 +321,7 @@ class QemuWorkflowTests(unittest.TestCase):
         self.assertIn("cancel-in-progress: ${{ github.event_name == 'pull_request' }}", workflow)
         # Every automatic job runs for merge_group, including image tests. No
         # event condition may silently make the full-suite queue gate a subset.
-        self.assertNotRegex(workflow, re.compile(r'^    if:', re.M))
+        self.assertEqual(re.findall(r'^    if: (.+)$', workflow, re.M), ['always()'])
         self.assertIn('scripts/test-acceptance.sh --automated-only', workflow)
         self.assertIn('scripts/test-python.py image --image cheesetrap-web:ci', workflow)
 
@@ -303,7 +354,7 @@ class QemuWorkflowTests(unittest.TestCase):
         self.assertEqual(triggers.strip(), 'workflow_dispatch:')
         automatic = (ROOT/'.github/workflows/ci.yml').read_text()
         self.assertEqual(re.findall(r'^  ([a-z-]+):$', automatic.split('\njobs:\n', 1)[1], re.M),
-                         ['secrets', 'dependencies', 'automated'])
+                         ['secrets', 'dependencies', 'acceptance', 'testcontainers', 'engines', 'automated'])
         self.assertNotIn('--privileged', automatic)
         self.assertNotIn('setup-qemu-action', automatic)
         self.assertIn('--execution qemu --timeout 60', workflow)

@@ -46,6 +46,12 @@ both lanes finish; every command result remains required and cancellation waits
 for owned cleanup. The original SQL generation and byte-for-byte drift check
 remain required. A failing command cannot suppress the other lane's results.
 
+CI runs acceptance, live Testcontainers regressions and image/engine checks on
+separate runners. The required `automated` verdict waits for all three and fails
+unless every job succeeds, including when work is cancelled or skipped. Each
+runner owns its disposable resources; private evidence is not uploaded between
+jobs. See the [CI guide](docs/operations/ci.md) for scope and result locations.
+
 ## Test a behavior change
 
 1. Choose one observable behavior and run a failing test first. This is the
