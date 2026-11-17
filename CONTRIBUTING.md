@@ -45,7 +45,9 @@ unit/vet. Pinned SQL compiler preparation overlaps UI tests, keeping its existin
 single-CPU Go settings. Both finish before UI build, SQL/OpenAPI generation and
 drift checks. Browser installs the Chromium
 headless shell and required OS libraries, then runs the existing Go E2E and browser
-harness. Failed browser preparation stops before another E2E install. Integration
+harness. Failed browser preparation stops before E2E. Successful preparation lets
+E2E reuse those dependencies with `--prepared-web`; its UI build and every test
+still run. Integration
 runs every existing test across six required CI shards on separate runners. Each
 component verifies all its concrete T01–T13 tests and labels requirements owned by
 another component. A component result cannot pass the complete acceptance gate.
@@ -118,6 +120,9 @@ The runner prepares locked dependencies, Chromium, the UI, a temporary DB, and a
 loopback API. It requires Docker, Compose, Python 3, Go, and Node/npm. It rejects
 external DB and browser-target settings and cleans up only its own test stack.
 It does not connect to an existing deployment.
+Use `scripts/test-e2e.sh --prepared-web` only after the same checkout's
+`scripts/prepare-ci-web.sh` succeeds. It rebuilds UI assets and runs every existing
+Go and browser test; the default command still installs its own dependencies.
 
 For UI journeys, add assertions to the specs in `web/e2e/` or `web/e2e-https/` and
 run the same command. Do not supply production DB, SMTP, credentials, or public

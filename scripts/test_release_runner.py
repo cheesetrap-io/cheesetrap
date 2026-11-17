@@ -226,7 +226,12 @@ class ReleaseGateTests(unittest.TestCase):
                 row['status'] = previous
             result['prepare_web'] = True
             result['commands'].append(dict(name='web-prepare', status='PASS'))
-            if component in ('source', 'browser'): validate(result)
+            if component in ('source', 'browser'):
+                validate(result)
+                with self.assertRaises(ValueError):
+                    validate(dict(result, commands=result['commands'][:-1]))
+                with self.assertRaises(ValueError):
+                    validate(dict(result, commands=result['commands'][:-1] + [dict(name='web-prepare', status='FAIL')]))
             else:
                 with self.assertRaises(ValueError): validate(result)
 
