@@ -42,8 +42,12 @@ candidate has passed. Required checks are `Secret scan`, `Dependency vulnerabili
 and `automated`, with no skipped required work accepted by the workflow.
 
 `scripts/test-acceptance.py` owns SQL, OpenAPI, UI type generation, contract and
-generated-diff checks, and the UI build. CI's `Check current automated result`
-requires this evidence through `release-check.sh --acceptance-results`.
+generated-diff checks, and the UI build. CI validates its source and complete Go
+integration components through explicit `release-check.sh --component-results`
+gates. The required `automated` verdict accepts only successful source,
+integration, live Testcontainers and engine jobs. Component results never qualify
+as complete local acceptance: `release-check.sh --acceptance-results` still
+requires a complete current result from acceptance without `--component`.
 `Build pinned images` builds the AMD64 app image and pinned sensors.
 `scripts/test-e2e.sh` remains an independent local runner. On failure, inspect
 the relevant job, step log, and summary.

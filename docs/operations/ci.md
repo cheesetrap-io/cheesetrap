@@ -8,7 +8,7 @@ and its queued candidate's checks are separate results.
 ## Which checks run
 
 Secret scanning and dependency auditing run for every PR. The `acceptance`,
-`testcontainers`, and `engines` jobs run independently on separate runners.
+`integration`, `testcontainers`, and `engines` jobs run independently on separate runners.
 Each resolves the complete PR diff and uses a documentation scope only for regular
 Markdown files under `docs/` or root `README.md`/`CONTRIBUTING.md`. `AGENTS.md`
 and unusual paths are excluded. This scope runs operation-doc regressions,
@@ -16,24 +16,34 @@ relative links and release metadata in `acceptance`; the other jobs report the
 reduced scope without building images or creating databases. This scope does not
 claim `PASS_AUTOMATED`.
 
-The required `automated` check waits for all three jobs and runs its verdict even
-after an upstream failure or cancellation. It accepts only three successful job
+The required `automated` check waits for all four jobs and runs its verdict even
+after an upstream failure or cancellation. It accepts only four successful job
 results. A failed, cancelled, skipped, missing or unknown result fails the verdict.
 Documentation jobs still execute their scope selection; they are not skipped jobs.
 The jobs exchange status results, never private evidence artifacts.
 
-Full acceptance prepares locked npm dependencies and Chromium alongside Python
+The source component prepares locked npm dependencies and Chromium alongside Python
 regressions, joining both before Go tests and DB work. Setup is a required command
 in the private result. A failed setup stops acceptance before E2E can install
 again. Cancellation stops both owned process groups and waits for cleanup.
 Local acceptance prepares web dependencies this way only when explicitly invoked
 with `--automated-only --prepare-web`.
 
-Acceptance also restores a rolling Go build-object cache on top of setup-go's
+The complete Go integration component runs every existing integration batch on
+its own runner. The source component owns Go unit/vet, E2E/browser, UI and all
+generation/drift checks. Each verifies every T01–T13 test belonging to its suites;
+requirements wholly owned by the other component are `OUT_OF_COMPONENT`.
+Only an explicit component-result gate accepts `PASS_COMPONENT`; the complete
+`--acceptance-results` gate rejects it. The strict `automated` join requires both
+components and both other work jobs. No private reports cross runner boundaries.
+Local acceptance without `--component` retains the complete original sequence.
+
+Both components restore rolling Go build-object caches on top of setup-go's
 dependency cache. Its key includes the OS, architecture, pinned Go version,
-module files and commit. Only a successful master push saves this additional
-cache, after the current automated-result gate passes; PRs and queue candidates
-only read it. A new commit can therefore refresh application objects even when
+module files and commit. Only a successful master component saves its cache,
+after its current component-result gate passes; PRs and queue candidates only
+read them. Integration can initially restore the complete acceptance cache from
+master before its own cache is seeded. A new commit can refresh objects even when
 the dependency cache already exists. The cache contains only `go env GOCACHE`,
 never private `.local` evidence. Every test still executes with its existing
 flags, including `-count=1`; cached test results do not replace checks.
@@ -60,10 +70,11 @@ result is not evidence that the full automated suite ran.
 
 | Job | Full-scope result to inspect |
 | --- | --- |
-| `acceptance` | Python, Go, disposable DB, browser, UI and generated-code checks; current `PASS_AUTOMATED_GATE` |
+| `acceptance` | Python, Go unit/vet, E2E/browser, UI and generated-code checks; `PASS_COMPONENT_GATE: source` |
+| `integration` | Every existing Go integration batch, including the bounded memory regression; `PASS_COMPONENT_GATE: integration` |
 | `testcontainers` | Live loopback, pinned-image, reaper and independent-cleanup regressions |
 | `engines` | Both pinned image builds and `PASS_PYTHON_IMAGE` |
-| `automated` | `CI_VERDICT PASS` only after all three work jobs succeed |
+| `automated` | `CI_VERDICT PASS` only after all four work jobs succeed |
 
 For a local documentation check, run:
 
