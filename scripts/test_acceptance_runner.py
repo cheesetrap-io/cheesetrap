@@ -361,11 +361,22 @@ sys.exit(9 if mode=='process-failed' else 0)
     def test_locked_web_setup_order_and_failure_stop_without_retry(self):
         script = runner.ROOT / 'scripts/prepare-ci-web.sh'
         self.assertTrue(script.is_file(), 'CI web setup needs an owned fail-fast command')
-        cases = [([], '', ['npm', 'npx'], 0), ([], 'npm', ['npm'], 9), ([], 'npx', ['npm', 'npx'], 9),
-                 (['--dependencies-only'], '', ['npm'], 0), (['--dependencies-only'], 'npm', ['npm'], 9),
-                 (['--unknown'], '', [], 2)]
-        for arguments, failed, expected, code in cases:
-            with self.subTest(failed=failed), tempfile.TemporaryDirectory(prefix='ci web ') as directory:
+        probe = ['--no-install', 'playwright', 'install-deps', '--dry-run', 'chromium']
+        install = ['--no-install', 'playwright', 'install', '--only-shell', 'chromium']
+        full_install = ['--no-install', 'playwright', 'install', '--with-deps', '--only-shell', 'chromium']
+        cases = [([], 'ready', '', [probe, install], 0),
+                 ([], 'ready', 'npx', [probe, install], 9),
+                 ([], 'missing', '', [probe, full_install], 0),
+                 ([], 'missing', 'npx', [probe, full_install], 9),
+                 ([], 'unknown', '', [probe, full_install], 0),
+                 ([], 'extra-output', '', [probe, full_install], 0),
+                 ([], 'error-ready', '', [probe, full_install], 0),
+                 ([], 'ready', 'npm', [], 9),
+                 (['--dependencies-only'], 'ready', '', [], 0),
+                 (['--dependencies-only'], 'ready', 'npm', [], 9),
+                 (['--unknown'], 'ready', '', [], 2)]
+        for arguments, readiness, failed, expected, code in cases:
+            with self.subTest(readiness=readiness, failed=failed, arguments=arguments), tempfile.TemporaryDirectory(prefix='ci web ') as directory:
                 root = Path(directory)
                 (root / 'bin').mkdir()
                 (root / 'scripts').mkdir()
@@ -379,18 +390,27 @@ sys.exit(9 if mode=='process-failed' else 0)
                         'name = pathlib.Path(sys.argv[0]).name\n' +
                         'with open(os.environ["EVENTS"], "a") as stream:\n' +
                         ' stream.write(json.dumps([name, os.getcwd(), sys.argv[1:]])+"\\n")\n' +
+                        'if name == "npx" and "install-deps" in sys.argv:\n' +
+                        ' outputs = {"ready": ("All system dependencies are installed.", 0),\n' +
+                        '  "missing": ("Missing system dependencies (1):\\n  synthetic-library", 1),\n' +
+                        '  "unknown": ("Unsupported system", 0),\n' +
+                        '  "extra-output": ("All system dependencies are installed.\\nextra", 0),\n' +
+                        '  "error-ready": ("All system dependencies are installed.", 1)}\n' +
+                        ' message, code = outputs[os.environ["READINESS"]]\n' +
+                        ' print(message)\n' +
+                        ' sys.exit(code)\n' +
                         'sys.exit(9 if os.environ["FAIL"] == name else 0)\n')
                     executable.chmod(0o700)
                 result = subprocess.run(['sh', str(target), *arguments], cwd='/', capture_output=True, text=True,
                     timeout=5, env=dict(PATH=str(root / 'bin') + os.pathsep + os.environ['PATH'],
-                                        EVENTS=str(root / 'events'), FAIL=failed))
+                                        EVENTS=str(root / 'events'), FAIL=failed, READINESS=readiness))
                 self.assertEqual(result.returncode, code, result.stderr)
                 rows = list(map(json.loads, (root / 'events').read_text().splitlines())) if (root / 'events').exists() else []
-                self.assertEqual([r[0] for r in rows], expected)
+                self.assertEqual([r[0] for r in rows], ([] if arguments == ['--unknown'] else ['npm']) + ['npx'] * len(expected))
                 self.assertTrue(all(r[1] == str(root / 'web') for r in rows))
                 if rows: self.assertEqual(rows[0][2], ['ci', '--no-audit', '--no-fund'])
-                if len(rows) == 2:
-                    self.assertEqual(rows[1][2], ['--no-install', 'playwright', 'install', '--with-deps', '--only-shell', 'chromium'])
+                self.assertEqual([r[2] for r in rows if r[0] == 'npx'], expected,
+                                 'only proven readiness avoids OS installation; actual setup is never retried')
 
     def test_memory_timings_are_bounded_private_and_never_change_failure(self):
         with tempfile.TemporaryDirectory() as directory:

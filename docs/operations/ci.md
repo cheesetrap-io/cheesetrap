@@ -30,7 +30,13 @@ Both results are required before the UI build and source generators; a failed
 compiler process, UI process, or missing/invalid UI report remains a failure.
 The browser component prepares locked
 npm dependencies, Chromium's headless shell and system libraries before the
-existing isolated Go E2E/browser harness. Setup is a required command in each private result. A failed
+existing isolated Go E2E/browser harness. Playwright's read-only
+`install-deps --dry-run chromium` simulates APT installation. Only exit zero with
+its exact installed-dependencies confirmation avoids an unnecessary APT update
+and install. Missing packages, an unsuccessful probe or unfamiliar output retain
+the original `install --with-deps --only-shell chromium` command. Browser
+installation and host validation still run; an actual installation failure stops
+setup without retry. Setup is a required command in each private result. A failed
 setup stops before E2E. Successful setup passes `--prepared-web` to E2E, which
 reuses npm/browser dependencies, rebuilds UI assets and runs the same complete
 Go/browser suite. The explicit component gate still requires the successful
