@@ -29,6 +29,7 @@ COMPONENT_COMMANDS = {
     'source': tuple(name for name in ACCEPTANCE_COMMANDS if name != 'integration'),
     'integration': ('integration',),
 }
+INTEGRATION_SHARDS = ('memory', 'jobs', 'retention', 'other', 'store')
 
 
 def require(condition, reason):
@@ -194,22 +195,41 @@ def validate_requirements(result, outside=()):
 def validate_acceptance(result, revision, sources):
     require(result.get('schema') == 1 and result.get('status') in ('PASS', 'PASS_AUTOMATED'), 'acceptance result did not pass')
     require(result.get('component') is None, 'component result is not complete acceptance')
+    require(result.get('integration_shard') is None, 'shard result is not complete acceptance')
     validate_identity(result, revision, sources)
     validate_commands(result, ACCEPTANCE_COMMANDS)
     validate_requirements(result)
 
 
-def validate_component(result, revision, sources, component, manifest):
+def shard_owns(test, shard):
+    if shard is None: return True
+    memory = test['package'] == 'cheesetrap/internal/reporting' and test['name'] == 'TestSecurityAggregateMemory'
+    if shard == 'memory': return memory
+    if memory: return False
+    packages = {'jobs': 'cheesetrap/internal/jobs', 'retention': 'cheesetrap/internal/retention',
+                'store': 'cheesetrap/internal/store'}
+    return test['package'] not in packages.values() if shard == 'other' else test['package'] == packages[shard]
+
+
+def validate_component(result, revision, sources, component, manifest, shard=None):
     require(component in COMPONENT_COMMANDS and result.get('component') == component,
             'unknown or mismatched acceptance component')
     require(result.get('schema') == 1 and result.get('status') == 'PASS_COMPONENT', 'component result did not pass')
+    require(shard is None or (component == 'integration' and shard in INTEGRATION_SHARDS), 'invalid integration shard')
+    require(result.get('integration_shard') == shard, 'integration shard result requires its explicit matching gate')
     validate_identity(result, revision, sources)
     validate_commands(result, COMPONENT_COMMANDS[component], allow_web=component == 'source')
     owned = {'integration'} if component == 'integration' else {'go', 'e2e'}
     outside = {r['id'] for r in manifest['requirements']
-               if not any(t['suite'] in owned for t in r['tests'])
+               if not any(t['suite'] in owned and shard_owns(t, shard) for t in r['tests'])
                and not (component == 'source' and (r.get('browser_tests') or r.get('ui_tests')))}
     validate_requirements(result, outside)
+    if shard == 'memory':
+        tests = result.get('tests')
+        require(isinstance(tests, dict) and isinstance(tests.get('integration'), list) and
+                any(isinstance(t, dict) and t.get('package') == 'cheesetrap/internal/reporting'
+                    and t.get('name') == 'TestSecurityAggregateMemory' for t in tests['integration']),
+                'memory regression coverage missing')
 
 
 def validate_clean_checkout(root):
@@ -223,10 +243,13 @@ def main():
     mode.add_argument('--metadata-only', action='store_true', help='static checks only; not release readiness')
     mode.add_argument('--acceptance-results', type=Path, help='current private test-acceptance results.json')
     mode.add_argument('--component-results', nargs=2, metavar=('COMPONENT', 'FILE'), help='validate one explicit CI component; never complete acceptance')
+    parser.add_argument('--integration-shard', choices=INTEGRATION_SHARDS, help='require the matching integration shard result')
     args = parser.parse_args()
     component = args.component_results[0] if args.component_results else None
     if args.component_results and component not in COMPONENT_COMMANDS:
         parser.error('component must be source or integration')
+    if args.integration_shard and component != 'integration':
+        parser.error('--integration-shard requires integration component results')
     validate_metadata(ROOT)
     if args.metadata_only:
         print('PASS_METADATA: documents, licenses, locks and acceptance coverage; no build/live-test claim')
@@ -241,7 +264,7 @@ def main():
     if component:
         manifest = read_json(ROOT, 'tests/acceptance/coverage.json')
         acceptance.validate_manifest(manifest)
-        validate_component(result, revision, acceptance.production_sources(), component, manifest)
+        validate_component(result, revision, acceptance.production_sources(), component, manifest, args.integration_shard)
         print('PASS_COMPONENT_GATE: ' + component + '; complete CI requires both components, Testcontainers and engines')
     else:
         validate_acceptance(result, revision, acceptance.production_sources())

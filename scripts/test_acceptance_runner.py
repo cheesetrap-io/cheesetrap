@@ -50,7 +50,7 @@ class AcceptanceGateTests(unittest.TestCase):
                 return 0
 
             args = argparse.Namespace(prepare_web=prepare_web, automated_only=True, linux_evidence=None,
-                                      component=component)
+                                      component=component, integration_shard=None)
             with mock.patch.object(runner, 'ROOT', root), \
                  mock.patch.dict(os.environ, {'PATH': os.environ['PATH']}, clear=True), \
                  mock.patch.object(runner.argparse.ArgumentParser, 'parse_args', return_value=args), \
@@ -111,6 +111,22 @@ class AcceptanceGateTests(unittest.TestCase):
                 self.assertEqual(owners, ['integration' if suite == 'integration' else 'source'])
                 self.assertTrue(any(r['status'] == 'FAIL' for r in runner.evaluate(manifest, partial, {})))
 
+    def test_required_integration_entries_belong_to_one_ci_shard(self):
+        manifest = json.loads((runner.ROOT / 'tests/acceptance/coverage.json').read_text())
+        self.assertTrue(callable(getattr(runner, 'integration_shard_for', None)), 'shard requirement ownership must be explicit')
+        suites = {'integration': {(t['package'], t['name']) for row in manifest['requirements']
+                                  for t in row['tests'] if t['suite'] == 'integration'}}
+        names = ('memory', 'jobs', 'retention', 'other', 'store')
+        for identity in suites['integration']:
+            partial = {'integration': suites['integration'] - {identity}}
+            owners = [name for name in names if any(row['status'] == 'FAIL' for row in
+                      runner.evaluate_component(manifest, partial, 'integration', name))]
+            self.assertEqual(len(owners), 1, 'no missing requirement may fall between shards')
+            self.assertEqual(owners[0], runner.integration_shard_for(dict(package=identity[0], name=identity[1])))
+        self.assertEqual(runner.integration_shard_for(dict(package='cheesetrap/internal/new_package', name='TestNew')), 'other')
+        self.assertEqual(runner.integration_shard_for(dict(package='cheesetrap/internal/reporting',
+                         name='TestSecurityAggregateMemory')), 'memory')
+
     def test_component_cli_and_gate_preserve_real_process_and_evidence_failures(self):
         spec = importlib.util.spec_from_file_location('component_release', runner.ROOT / 'scripts/release-check.py')
         checker = importlib.util.module_from_spec(spec)
@@ -128,13 +144,15 @@ class AcceptanceGateTests(unittest.TestCase):
             harness = root / 'scripts/test-integration.sh'
             harness.write_text('#!' + sys.executable + '\n' + '''import json, pathlib, sys
 root = pathlib.Path(__file__).resolve().parents[1]
-assert sys.argv[1:] == ['./...']
+sharded = sys.argv[1:] == ['--ci-shard', 'memory']
+assert sharded or sys.argv[1:] == ['./...']
 mode = (root/'fixture-mode').read_text()
-for batch in range(4):
+for batch in range(1 if sharded else 4):
  path = root/'.local/fixture'/('batch'+str(batch)+'.jsonl')
  path.parent.mkdir(parents=True, exist_ok=True)
  event = dict(Action='fail' if mode=='failed-test' and batch==2 else 'pass',
-              Package='cheesetrap/internal/fixture', Test='TestFixture')
+              Package='cheesetrap/internal/reporting' if sharded else 'cheesetrap/internal/fixture',
+              Test='TestSecurityAggregateMemory' if sharded and mode!='wrong-memory-test' else 'TestFixture')
  output = dict(Action='output', Package=event['Package'], Test=event['Test'], Output='private-runtime-canary')
  path.write_text(json.dumps(event)+'\\n'+json.dumps(output)+'\\n')
  if not (mode=='missing-evidence' and batch==3): print('PASS: evidence '+str(path.relative_to(root)))
@@ -147,13 +165,15 @@ sys.exit(9 if mode=='process-failed' else 0)
                                 '-c', 'core.hooksPath=/dev/null', '-c', 'commit.gpgsign=false', *arguments],
                                cwd=root, env=env, check=True, capture_output=True, timeout=10)
             git('init', '-q')
-            for mode in ('good', 'failed-test', 'missing-evidence', 'process-failed'):
-                with self.subTest(mode=mode):
+            for mode, shard in [('good', None), ('failed-test', None), ('missing-evidence', None),
+                                ('process-failed', None), ('good', 'memory'), ('wrong-memory-test', 'memory')]:
+                with self.subTest(mode=mode, shard=shard):
                     (root / 'fixture-mode').write_text(mode)
                     git('add', '.')
                     git('commit', '-qm', 'fixture ' + mode)
                     result = subprocess.run([sys.executable, '-B', str(root / 'scripts/test-acceptance.py'),
-                        '--automated-only', '--component', 'integration'], cwd=root, env=env,
+                        '--automated-only', '--component', 'integration',
+                        *(['--integration-shard', shard] if shard else [])], cwd=root, env=env,
                         capture_output=True, text=True, timeout=10)
                     self.assertEqual(result.returncode, 0 if mode == 'good' else 1, result.stdout + result.stderr)
                     self.assertNotIn('private-runtime-canary', result.stdout + result.stderr)
@@ -161,9 +181,11 @@ sys.exit(9 if mode=='process-failed' else 0)
                     report = json.loads(path.read_text())
                     self.assertEqual(report['status'], 'PASS_COMPONENT' if mode == 'good' else 'FAIL')
                     self.assertEqual(report['component'], 'integration')
+                    self.assertEqual(report.get('integration_shard'), shard)
                     self.assertEqual([c['name'] for c in report['commands']], ['integration'])
                     gate = subprocess.run([sys.executable, '-B', str(root / 'scripts/release-check.py'),
-                        '--component-results', 'integration', str(path)], cwd=root, env=env,
+                        '--component-results', 'integration', str(path),
+                        *(['--integration-shard', shard] if shard else [])], cwd=root, env=env,
                         capture_output=True, text=True, timeout=10)
                     self.assertEqual(gate.returncode, 0 if mode == 'good' else 1, gate.stdout + gate.stderr)
                     if mode == 'good':
@@ -210,6 +232,8 @@ sys.exit(9 if mode=='process-failed' else 0)
 
     def test_component_modes_are_explicit_and_do_not_prepare_unrelated_tools(self):
         for args, message in [(['--component', 'source'], '--component requires --automated-only'),
+                              (['--automated-only', '--component', 'source', '--integration-shard', 'memory'],
+                               '--integration-shard requires the integration component'),
                               (['--automated-only', '--component', 'integration', '--prepare-web'],
                                'integration component cannot prepare web dependencies')]:
             with self.subTest(args=args):

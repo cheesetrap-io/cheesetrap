@@ -29,21 +29,28 @@ again. Cancellation stops both owned process groups and waits for cleanup.
 Local acceptance prepares web dependencies this way only when explicitly invoked
 with `--automated-only --prepare-web`.
 
-The complete Go integration component runs every existing integration batch on
-its own runner. The source component owns Go unit/vet, E2E/browser, UI and all
+The Go integration component is a five-runner matrix: memory, jobs, retention,
+other packages, and store. Every shard owns one fresh bounded PostgreSQL stack;
+new packages enter the other-packages shard. Fail-fast is disabled so one failed
+shard cannot cancel its siblings. The matrix reports success only after every
+shard succeeds. The source component owns Go unit/vet, E2E/browser, UI and all
 generation/drift checks. Each verifies every T01–T13 test belonging to its suites;
-requirements wholly owned by the other component are `OUT_OF_COMPONENT`.
+requirements wholly owned by another component or shard are `OUT_OF_COMPONENT`.
 Only an explicit component-result gate accepts `PASS_COMPONENT`; the complete
 `--acceptance-results` gate rejects it. The strict `automated` join requires both
-components and both other work jobs. No private reports cross runner boundaries.
-Local acceptance without `--component` retains the complete original sequence.
+components (including all five integration shards) and both other work jobs.
+A shard result requires its explicit matching `--integration-shard` gate; the
+memory shard must also report the named memory regression passing. No private
+reports cross runner boundaries. Local acceptance without `--component` retains
+the complete original sequence; unsharded integration retains four local batches.
 
 Both components restore rolling Go build-object caches on top of setup-go's
 dependency cache. Its key includes the OS, architecture, pinned Go version,
 module files and commit. Only a successful master component saves its cache,
 after its current component-result gate passes; PRs and queue candidates only
-read them. Integration can initially restore the complete acceptance cache from
-master before its own cache is seeded. A new commit can refresh objects even when
+read them. Integration keys include the shard so sibling writers cannot race for
+one immutable key. Each can initially restore the complete integration or
+acceptance cache from master before its own cache is seeded. A commit can refresh objects even when
 the dependency cache already exists. The cache contains only `go env GOCACHE`,
 never private `.local` evidence. Every test still executes with its existing
 flags, including `-count=1`; cached test results do not replace checks.
@@ -71,7 +78,7 @@ result is not evidence that the full automated suite ran.
 | Job | Full-scope result to inspect |
 | --- | --- |
 | `acceptance` | Python, Go unit/vet, E2E/browser, UI and generated-code checks; `PASS_COMPONENT_GATE: source` |
-| `integration` | Every existing Go integration batch, including the bounded memory regression; `PASS_COMPONENT_GATE: integration` |
+| `integration (...)` | All five shards, including the bounded memory regression; each has `PASS_COMPONENT_GATE: integration` |
 | `testcontainers` | Live loopback, pinned-image, reaper and independent-cleanup regressions |
 | `engines` | Both pinned image builds and `PASS_PYTHON_IMAGE` |
 | `automated` | `CI_VERDICT PASS` only after all four work jobs succeed |
