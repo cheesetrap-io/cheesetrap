@@ -19,6 +19,50 @@ runner = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(runner)
 
 class AcceptanceGateTests(unittest.TestCase):
+    def test_memory_timings_are_bounded_private_and_never_change_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / '.local').mkdir()
+            source = 'internal/reporting/memory_integration_test.go'
+            (root / source).parent.mkdir(parents=True)
+            (root / source).write_text('package reporting\nfunc TestSecurityAggregateMemory(t *testing.T) {}\n')
+            def event(row, **changes):
+                return dict(dict(Action='output', Package='cheesetrap/internal/reporting',
+                                 Test='TestSecurityAggregateMemory',
+                                 Output='    memory_integration_test.go:150: MEMORY_TIMING '+json.dumps(row)+'\n'), **changes)
+            valid = dict(phase='child_build', elapsed_ms=1250, compile_actions=45)
+            rows = [event(valid), event(dict(phase='draft', elapsed_ms=2500)),
+                    event(dict(phase='revision', elapsed_ms=1)), event(dict(phase='revision', elapsed_ms=2)),
+                    event(dict(valid, phase='private-runtime-canary')),
+                    event(dict(valid, elapsed_ms=True)), event(dict(valid, elapsed_ms=-1)),
+                    event(dict(valid, elapsed_ms=1200001)), event(dict(valid, compile_actions=True)),
+                    event(dict(valid, compile_actions=10001)), event(dict(valid, compile_actions=-1)),
+                    event(dict(valid, extra='private-runtime-canary')),
+                    event(dict(valid, phase='draft')), event(valid, Action='pass'),
+                    event(valid, Package='private-runtime-canary'),
+                    event(valid, Test='TestSecurityAggregateMemory/private-runtime-canary'),
+                    event(valid, Output='MEMORY_TIMING not-json'), event(valid, Output=None),
+                    event(dict(phase=[], elapsed_ms=1)), event(dict(phase='draft', elapsed_ms=1.5)),
+                    dict(Action='output', Output='private-runtime-canary'), [], None]
+            (root / '.local/batch.jsonl').write_text('\n'.join(map(json.dumps, rows)))
+            (root / 'outside.jsonl').write_text(json.dumps(event(dict(phase='wide_revision', elapsed_ms=99))))
+            (root / '.local/alias.jsonl').symlink_to(root / 'outside.jsonl')
+            for status in ('PASS', 'FAIL'):
+                captured = io.StringIO()
+                with self.subTest(status=status), mock.patch.object(runner, 'ROOT', root), \
+                     mock.patch.object(runner.subprocess, 'check_output', return_value=(source+'\0').encode()), \
+                     contextlib.redirect_stdout(captured):
+                    runner.print_public_summary([dict(name='integration', status=status,
+                        test_logs=['.local/batch.jsonl', '.local/../outside.jsonl', '.local/alias.jsonl'])])
+                row = json.loads(captured.getvalue().removeprefix('CI_CHECK '))
+                self.assertEqual(row.get('memory_timings'), [
+                    dict(batch=1, **valid), dict(batch=1, phase='draft', elapsed_ms=2500)])
+                self.assertEqual(row['status'], status)
+                self.assertNotIn('private-runtime-canary', captured.getvalue())
+                self.assertNotIn('outside.jsonl', captured.getvalue())
+            with mock.patch.object(runner, 'ROOT', root):
+                self.assertEqual(len(runner.public_memory_timings(['.local/batch.jsonl'] * 10)), 11)
+
     def test_package_timings_publish_only_source_packages_and_never_change_failure(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
