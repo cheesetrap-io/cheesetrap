@@ -30,7 +30,7 @@ COMPONENT_COMMANDS = {
     'browser': ('e2e',),
     'integration': ('integration',),
 }
-INTEGRATION_SHARDS = ('memory', 'jobs', 'retention', 'api', 'other', 'store')
+INTEGRATION_SHARDS = ('memory', 'jobs', 'retention-recovery', 'retention', 'api', 'other', 'store')
 
 
 def require(condition, reason):
@@ -207,6 +207,9 @@ def shard_owns(test, shard):
     memory = test['package'] == 'cheesetrap/internal/reporting' and test['name'] == 'TestSecurityAggregateMemory'
     if shard == 'memory': return memory
     if memory: return False
+    recovery = test['package'] == 'cheesetrap/internal/jobs' and test['name'] == 'TestRetentionRiverDeferralRecovery'
+    if shard == 'retention-recovery': return recovery
+    if recovery: return False
     packages = {'jobs': 'cheesetrap/internal/jobs', 'retention': 'cheesetrap/internal/retention',
                 'api': 'cheesetrap/internal/api', 'store': 'cheesetrap/internal/store'}
     return test['package'] not in packages.values() if shard == 'other' else test['package'] == packages[shard]
@@ -226,12 +229,14 @@ def validate_component(result, revision, sources, component, manifest, shard=Non
                and not (component == 'source' and r.get('ui_tests'))
                and not (component == 'browser' and r.get('browser_tests'))}
     validate_requirements(result, outside)
-    if shard == 'memory':
+    required_regressions = {'memory': ('cheesetrap/internal/reporting', 'TestSecurityAggregateMemory'),
+                            'retention-recovery': ('cheesetrap/internal/jobs', 'TestRetentionRiverDeferralRecovery')}
+    if shard in required_regressions:
+        package, name = required_regressions[shard]
         tests = result.get('tests')
         require(isinstance(tests, dict) and isinstance(tests.get('integration'), list) and
-                any(isinstance(t, dict) and t.get('package') == 'cheesetrap/internal/reporting'
-                    and t.get('name') == 'TestSecurityAggregateMemory' for t in tests['integration']),
-                'memory regression coverage missing')
+                any(isinstance(t, dict) and t.get('package') == package and t.get('name') == name
+                    for t in tests['integration']), 'memory or retention recovery regression coverage missing')
 
 
 def validate_clean_checkout(root):

@@ -287,7 +287,9 @@ class QemuWorkflowTests(unittest.TestCase):
             legacy = prefix.replace('integration-${{ matrix.shard }}-go-build', 'integration-go-build')
             other = prefix.replace('integration-${{ matrix.shard }}-go-build', 'integration-other-go-build')
             self.assertIn(other, prefixes, 'new API shard must reuse master objects from the existing other shard')
-            self.assertTrue(set(prefixes) <= {prefix, other, legacy, legacy.replace('integration-go-build', 'acceptance-go-build')})
+            jobs = prefix.replace('integration-${{ matrix.shard }}-go-build', 'integration-jobs-go-build')
+            self.assertIn(jobs, prefixes, 'the recovery shard can seed its objects from successful master jobs')
+            self.assertTrue(set(prefixes) <= {prefix, other, jobs, legacy, legacy.replace('integration-go-build', 'acceptance-go-build')})
         elif job == 'browser':
             self.assertEqual(prefixes, [prefix, prefix.replace('browser-go-build', 'acceptance-go-build')])
         else:
@@ -334,8 +336,8 @@ class QemuWorkflowTests(unittest.TestCase):
         self.assertNotIn('exclude:', job)
         match = re.search(r'^        shard: \[([^\]]+)\]$', job, re.M)
         self.assertIsNotNone(match, 'CI must enumerate every required integration shard')
-        self.assertEqual(match.group(1).split(', '), ['memory', 'jobs', 'retention', 'api', 'other', 'store'])
-        self.assertIn('max-parallel: 6', job)
+        self.assertEqual(match.group(1).split(', '), ['memory', 'jobs', 'retention-recovery', 'retention', 'api', 'other', 'store'])
+        self.assertIn('max-parallel: 7', job)
         self.assertIn('CI_SHARD: ${{ matrix.shard }}', job)
         self.assertIn('--component integration --integration-shard "$CI_SHARD"', job)
         self.assertIn('--component-results integration "$result" --integration-shard "$CI_SHARD"', job)

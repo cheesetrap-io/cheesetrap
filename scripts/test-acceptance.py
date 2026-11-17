@@ -21,7 +21,7 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 LINUX_CHECKS = {'linux-install', 'linux-public-boundary', 'linux-sensor-egress', 'linux-ipv6'}
-INTEGRATION_SHARDS = ('memory', 'jobs', 'retention', 'api', 'other', 'store')
+INTEGRATION_SHARDS = ('memory', 'jobs', 'retention-recovery', 'retention', 'api', 'other', 'store')
 
 
 class AcceptanceInterrupted(Exception):
@@ -617,6 +617,8 @@ def run_status(rows, commands, automated=False):
 def integration_shard_for(test):
     if test['package'] == 'cheesetrap/internal/reporting' and test['name'] == 'TestSecurityAggregateMemory':
         return 'memory'
+    if test['package'] == 'cheesetrap/internal/jobs' and test['name'] == 'TestRetentionRiverDeferralRecovery':
+        return 'retention-recovery'
     return {'cheesetrap/internal/jobs': 'jobs', 'cheesetrap/internal/retention': 'retention',
             'cheesetrap/internal/api': 'api', 'cheesetrap/internal/store': 'store'}.get(test['package'], 'other')
 
@@ -768,7 +770,9 @@ def main():
             output = (ROOT / integration['log']).read_text(errors='replace')
             suites['integration'], logs = harness_results(output, integration['returncode'], 1 if args.integration_shard else 4)
             integration['test_logs'] = logs
-            if args.integration_shard == 'memory' and ('cheesetrap/internal/reporting', 'TestSecurityAggregateMemory') not in suites['integration']:
+            required_regressions = {'memory': ('cheesetrap/internal/reporting', 'TestSecurityAggregateMemory'),
+                                    'retention-recovery': ('cheesetrap/internal/jobs', 'TestRetentionRiverDeferralRecovery')}
+            if args.integration_shard in required_regressions and required_regressions[args.integration_shard] not in suites['integration']:
                 integration['status'] = 'FAIL'
         except (ValueError, OSError):
             integration['status'] = 'FAIL'

@@ -24,7 +24,7 @@ import tempfile
 import time
 
 ROOT = Path(__file__).resolve().parents[1]
-CI_SHARDS = ('memory', 'jobs', 'retention', 'api', 'other', 'store')
+CI_SHARDS = ('memory', 'jobs', 'retention-recovery', 'retention', 'api', 'other', 'store')
 
 
 class IntegrationInterrupted(Exception):
@@ -215,9 +215,14 @@ def ci_shards(packages, flags):
     batches = full_suite_batches(packages, flags)
     if './internal/api' not in packages:
         raise ValueError('CI integration package inventory is incomplete')
-    return dict(memory=batches[0], jobs=(["./internal/jobs"], flags),
-                retention=(["./internal/retention"], flags), api=(["./internal/api"], flags),
-                other=([p for p in batches[2][0] if p != './internal/api'], batches[2][1]), store=batches[3])
+    recovery = '^TestRetentionRiverDeferralRecovery$'
+    return {'memory': batches[0],
+            'jobs': (["./internal/jobs"], flags + ['-skip', recovery]),
+            'retention-recovery': (["./internal/jobs"], flags + ['-run', recovery]),
+            'retention': (["./internal/retention"], flags),
+            'api': (["./internal/api"], flags),
+            'other': ([p for p in batches[2][0] if p != './internal/api'], batches[2][1]),
+            'store': batches[3]}
 
 
 def ci_shard_argument(argv):

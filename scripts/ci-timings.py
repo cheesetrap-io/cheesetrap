@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Read-only first-attempt PR measurements; never dispatches or reruns CI."""
 import argparse
+import base64
 import datetime as dt
 import hashlib
 import json
@@ -13,12 +14,11 @@ import sys
 from urllib.parse import urlencode
 
 REQUIRED = ('Secret scan', 'Dependency vulnerabilities', 'automated')
+LEGACY_SHARDS = ('memory', 'jobs', 'retention', 'api', 'other', 'store')
 WORK = {'acceptance': 'Run source and generated-code component',
         'browser': 'Run complete E2E and browser component',
         'testcontainers': 'Verify Testcontainers loopback ports and locked Ryuk image',
-        'engines': 'Build pinned images',
-        **{'integration ('+name+')': 'Run required Go integration shard'
-           for name in ('memory', 'jobs', 'retention', 'api', 'other', 'store')}}
+        'engines': 'Build pinned images'}
 TERMINAL = {'success', 'failure', 'cancelled', 'timed_out', 'skipped', 'neutral', 'action_required', 'stale', 'startup_failure'}
 CONFIG_FILES = ('.github/workflows/ci.yml', '.github/merge-queue.ruleset.json', '.nvmrc',
     'deploy/toolchain.lock.json', 'deploy/images.lock.json', 'deploy/Dockerfile',
@@ -64,7 +64,9 @@ def associated(run, pr):
             (not pr.get('closed_at') or started <= timestamp(pr['closed_at'])))
 
 
-def measure(repo, pr, run, jobs, checks, configuration):
+def measure(repo, pr, run, jobs, checks, configuration, *, integration_shards=LEGACY_SHARDS):
+    work = dict(WORK, **{'integration ('+name+')': 'Run required Go integration shard'
+                        for name in integration_shards})
     require(pr.get('base', {}).get('repo', {}).get('full_name') == repo and
             run.get('repository', {}).get('full_name') == repo, 'repository mismatch')
     require(run.get('event') == 'pull_request' and run.get('run_attempt') == 1 and
@@ -76,7 +78,7 @@ def measure(repo, pr, run, jobs, checks, configuration):
     rows = jobs.get('jobs', [])
     by_name = {j.get('name'): j for j in rows}
     require(jobs.get('total_count') == len(rows) == len(by_name) and
-            set(by_name) == set(WORK) | set(REQUIRED), 'incomplete or unsupported job inventory')
+            set(by_name) == set(work) | set(REQUIRED), 'incomplete or unsupported job inventory')
     require(len(checks) == len(REQUIRED) and {c.get('name') for c in checks} == set(REQUIRED), 'missing or duplicate required context')
     created, started = timestamp(pr.get('created_at')), timestamp(run.get('created_at'))
     require(started >= created, 'run predates PR')
@@ -105,12 +107,12 @@ def measure(repo, pr, run, jobs, checks, configuration):
     docs = step_conclusion(by_name['acceptance'], 'Check documentation PR') == 'success'
     automated = next(c for c in checks if c['name'] == 'automated')
     if automated['conclusion'] == 'success':
-        require(all(by_name[name]['conclusion'] == 'success' for name in WORK), 'automated verdict hides failed work')
+        require(all(by_name[name]['conclusion'] == 'success' for name in work), 'automated verdict hides failed work')
     passed = all(c['conclusion'] == 'success' for c in checks)
     if run['conclusion'] == 'success':
         require(passed, 'successful run hides failed required context')
     if passed and not docs:
-        require(all(step_conclusion(by_name[name], step) == 'success' for name, step in WORK.items()),
+        require(all(step_conclusion(by_name[name], step) == 'success' for name, step in work.items()),
                 'successful full result lacks required work')
     cancelled = run['conclusion'] == 'cancelled'
     return dict(pr=pr['number'], run=run['id'], head=head, configuration=configuration,
@@ -162,6 +164,39 @@ def configuration_id(tree):
     return hashlib.sha256(json.dumps(selected, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
 
 
+def workflow_shards(blob, expected_sha):
+    require(blob.get('sha') == expected_sha and blob.get('encoding') == 'base64', 'workflow blob identity mismatch')
+    try:
+        raw = base64.b64decode(''.join(blob['content'].split()), validate=True)
+        source = raw.decode('utf-8')
+    except (ValueError, KeyError, TypeError, AttributeError, UnicodeError):
+        raise ValueError('invalid immutable workflow blob') from None
+    require(hashlib.sha1(b'blob ' + str(len(raw)).encode() + b'\0' + raw).hexdigest() == expected_sha,
+            'workflow content does not match immutable Git blob')
+    lines = source.splitlines()
+    starts = [i for i, line in enumerate(lines) if line == '  integration:']
+    require(len(starts) == 1, 'unsupported integration workflow structure')
+    block = []
+    for line in lines[starts[0]+1:]:
+        if line.strip() and line.startswith('  ') and not line.startswith('    '): break
+        block.append(line)
+    matrices, strategy, matrix = [], False, False
+    for line in block:
+        if not line.strip() or line.lstrip().startswith('#'): continue
+        if re.match(r'^    \S', line):
+            strategy, matrix = line == '    strategy:', False
+        elif re.match(r'^      \S', line):
+            matrix = strategy and line == '      matrix:'
+        elif matrix and (match := re.fullmatch(r'        shard: \[([a-z, -]+)\]', line)):
+            matrices.append(match)
+    require(len(matrices) == 1, 'workflow must contain one supported literal shard matrix')
+    shards = tuple(matrices[0].group(1).split(', '))
+    require(len(shards) == len(set(shards)) and
+            set(shards) in (set(LEGACY_SHARDS), set(LEGACY_SHARDS) | {'retention-recovery'}),
+            'unsupported workflow shard inventory')
+    return shards
+
+
 def api_get(path):
     try:
         result = subprocess.run(['gh', 'api', '--hostname', 'github.com', '--method', 'GET', path],
@@ -207,8 +242,11 @@ def collect(repo, number, run_id, read=None):
         checks.append(read(url.removeprefix('https://api.github.com/')))
     tree_id = run.get('head_commit', {}).get('tree_id', '')
     require(bool(re.fullmatch('[a-f0-9]{40}', tree_id)), 'missing immutable source tree')
-    configuration = configuration_id(read(f'{base}/git/trees/{tree_id}?recursive=1'))
-    result = measure(repo, pr, run, jobs, checks, configuration)
+    tree = read(f'{base}/git/trees/{tree_id}?recursive=1')
+    configuration = configuration_id(tree)
+    workflow_sha = next(e['sha'] for e in tree['tree'] if e['path'] == '.github/workflows/ci.yml')
+    shards = workflow_shards(read(f'{base}/git/blobs/{workflow_sha}'), workflow_sha)
+    result = measure(repo, pr, run, jobs, checks, configuration, integration_shards=shards)
     if not run.get('pull_requests') and closed_head:
         result['attribution'] = 'head-repository-branch-window-and-pr-head'
     return result

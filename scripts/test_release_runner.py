@@ -242,7 +242,9 @@ class ReleaseGateTests(unittest.TestCase):
         identities = {(t['package'], t['name']) for r in manifest['requirements'] for t in r['tests']
                       if t['suite'] == 'integration'}
         identities.add(('cheesetrap/internal/reporting', 'TestSecurityAggregateMemory'))
-        for shard in ('memory', 'jobs', 'retention', 'api', 'other', 'store'):
+        identities.add(('cheesetrap/internal/jobs', 'TestRetentionRiverDeferralRecovery'))
+        self.assertFalse(self.checker.shard_owns(dict(package='cheesetrap/internal/jobs', name='TestRetentionRiverDeferralRecovery'), 'jobs'))
+        for shard in ('memory', 'jobs', 'retention-recovery', 'retention', 'api', 'other', 'store'):
             result = self.evidence()
             result.update(status='PASS_COMPONENT', component='integration', integration_shard=shard,
                 commands=[dict(name='integration', status='PASS')],
@@ -255,9 +257,9 @@ class ReleaseGateTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     self.checker.validate_component(result, 'a' * 40, {'go.mod': 'b' * 64}, 'integration', manifest,
                                                     'store' if shard != 'store' else 'other')
-                if shard == 'memory':
+                if shard in ('memory', 'retention-recovery'):
                     result['tests']['integration'] = []
-                    with self.assertRaisesRegex(ValueError, 'memory'):
+                    with self.assertRaisesRegex(ValueError, 'memory|recovery'):
                         self.checker.validate_component(result, 'a' * 40, {'go.mod': 'b' * 64}, 'integration', manifest, shard)
 
     def test_ci_web_preparation_is_an_additional_required_success(self):

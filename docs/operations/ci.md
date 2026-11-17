@@ -47,8 +47,11 @@ configurations use headless Chromium without a browser channel or executable
 override, so `--only-shell` avoids downloading unused headed Chromium; every
 existing browser test and OS dependency check still runs.
 
-The Go integration component is a matrix with six runners: memory, jobs, retention,
-API, other packages, and store. Every shard owns one fresh bounded PostgreSQL stack;
+The Go integration component is a matrix with seven runners: memory, jobs,
+retention recovery, retention, API, other packages, and store. The recovery shard
+runs `TestRetentionRiverDeferralRecovery` with both original 20-second horizons;
+jobs runs every other jobs test. The real Go AST inventory verifies every test is
+selected exactly once across the matrix. Every shard owns one fresh bounded PostgreSQL stack;
 new packages enter the other-packages shard. Fail-fast is disabled so one failed
 shard cannot cancel its siblings. The matrix reports success only after every
 shard succeeds. The source component owns Go unit/vet, UI and all generation/drift
@@ -57,9 +60,9 @@ every T01–T13 test belonging to its suites;
 requirements wholly owned by another component or shard are `OUT_OF_COMPONENT`.
 Only an explicit component-result gate accepts `PASS_COMPONENT`; the complete
 `--acceptance-results` gate rejects it. The strict `automated` join requires all
-three components (including all six integration shards) and both other work jobs.
+three components (including all seven integration shards) and both other work jobs.
 A shard result requires its explicit matching `--integration-shard` gate; the
-memory shard must also report the named memory regression passing. No private
+memory and recovery shards must also report their respective named regressions passing. No private
 reports cross runner boundaries. Local acceptance without `--component` retains
 the complete original sequence; unsharded integration retains four local batches.
 
@@ -71,7 +74,8 @@ read them. Integration keys include the shard so sibling writers cannot race for
 one immutable key. Integration can initially restore the other-packages, complete
 integration or acceptance cache. This lets API reuse its previous runner's Go
 objects on master before its own cache is seeded. Browser can restore the acceptance
-cache before its own cache is seeded. A commit can refresh objects even when
+cache before its own cache is seeded. A new recovery shard can restore the existing
+master jobs cache. A commit can refresh objects even when
 the dependency cache already exists. The cache contains only `go env GOCACHE`,
 never private `.local` evidence. Every test still executes with its existing
 flags, including `-count=1`; cached test results do not replace checks.
@@ -100,7 +104,7 @@ result is not evidence that the full automated suite ran.
 | --- | --- |
 | `acceptance` | Python, Go unit/vet, UI and generated-code checks; `PASS_COMPONENT_GATE: source` |
 | `browser` | Every Go E2E and Chromium test; `PASS_COMPONENT_GATE: browser` |
-| `integration (...)` | All six shards, including the bounded memory regression; each has `PASS_COMPONENT_GATE: integration` |
+| `integration (...)` | All seven shards, including the original memory and retention recovery regressions; each has `PASS_COMPONENT_GATE: integration` |
 | `testcontainers` | Live loopback, pinned-image, reaper and independent-cleanup regressions |
 | `engines` | Both pinned image builds and `PASS_PYTHON_IMAGE` |
 | `automated` | `CI_VERDICT PASS` only after all five work jobs succeed |
@@ -128,7 +132,10 @@ python3 -B scripts/ci-timings.py --sample 25:44091098271 --sample 26:44097216458
 Repeat `--sample PR_NUMBER:RUN_ID` for each PR in the observation window. The tool
 reads attempt one, checks that the selected run is the first associated PR cohort,
 and rejects duplicate PRs or runs. A newer head or successful rerun cannot replace
-that first result. It verifies the current 13-job inventory, native GitHub Actions
+that first result. It reads the exact run's immutable workflow Git blob, verifies
+its Git object hash and supported literal six- or seven-shard matrix, and then
+requires the matching 13- or 14-job inventory. A newer matrix cannot use an older
+job count to hide a missing shard. It also verifies native GitHub Actions
 app, exact head revision, run/job URLs and required-context conclusions. Merged PRs
 can lose native run-to-PR links; in that case it requires the same head repository
 and branch during the PR's lifetime plus a GitHub commit-to-PR association. The

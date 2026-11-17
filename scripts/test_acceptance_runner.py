@@ -214,7 +214,8 @@ sys.exit(int(sys.argv[2]) if database.exists() else 12)
         suites = {'integration': {(t['package'], t['name']) for row in manifest['requirements']
                                   for t in row['tests'] if t['suite'] == 'integration'}}
         self.assertEqual(runner.integration_shard_for(dict(package='cheesetrap/internal/api', name='TestReviewFlow')), 'api')
-        names = ('memory', 'jobs', 'retention', 'api', 'other', 'store')
+        self.assertEqual(runner.integration_shard_for(dict(package='cheesetrap/internal/jobs', name='TestRetentionRiverDeferralRecovery')), 'retention-recovery')
+        names = ('memory', 'jobs', 'retention-recovery', 'retention', 'api', 'other', 'store')
         for identity in suites['integration']:
             partial = {'integration': suites['integration'] - {identity}}
             owners = [name for name in names if any(row['status'] == 'FAIL' for row in
@@ -242,15 +243,16 @@ sys.exit(int(sys.argv[2]) if database.exists() else 12)
             harness = root / 'scripts/test-integration.sh'
             harness.write_text('#!' + sys.executable + '\n' + '''import json, pathlib, sys
 root = pathlib.Path(__file__).resolve().parents[1]
-sharded = sys.argv[1:] == ['--ci-shard', 'memory']
+sharded = sys.argv[1:] in (['--ci-shard', 'memory'], ['--ci-shard', 'retention-recovery'])
+recovery = sys.argv[1:] == ['--ci-shard', 'retention-recovery']
 assert sharded or sys.argv[1:] == ['./...']
 mode = (root/'fixture-mode').read_text()
 for batch in range(1 if sharded else 4):
  path = root/'.local/fixture'/('batch'+str(batch)+'.jsonl')
  path.parent.mkdir(parents=True, exist_ok=True)
  event = dict(Action='fail' if mode=='failed-test' and batch==2 else 'pass',
-              Package='cheesetrap/internal/reporting' if sharded else 'cheesetrap/internal/fixture',
-              Test='TestSecurityAggregateMemory' if sharded and mode!='wrong-memory-test' else 'TestFixture')
+              Package='cheesetrap/internal/jobs' if recovery else 'cheesetrap/internal/reporting' if sharded else 'cheesetrap/internal/fixture',
+              Test=('TestRetentionRiverDeferralRecovery' if mode!='wrong-recovery-test' else 'TestFixture') if recovery else 'TestSecurityAggregateMemory' if sharded and mode!='wrong-memory-test' else 'TestFixture')
  output = dict(Action='output', Package=event['Package'], Test=event['Test'], Output='private-runtime-canary')
  path.write_text(json.dumps(event)+'\\n'+json.dumps(output)+'\\n')
  if not (mode=='missing-evidence' and batch==3): print('PASS: evidence '+str(path.relative_to(root)))
@@ -264,7 +266,8 @@ sys.exit(9 if mode=='process-failed' else 0)
                                cwd=root, env=env, check=True, capture_output=True, timeout=10)
             git('init', '-q')
             for mode, shard in [('good', None), ('failed-test', None), ('missing-evidence', None),
-                                ('process-failed', None), ('good', 'memory'), ('wrong-memory-test', 'memory')]:
+                                ('process-failed', None), ('good', 'memory'), ('wrong-memory-test', 'memory'),
+                                ('good', 'retention-recovery'), ('wrong-recovery-test', 'retention-recovery')]:
                 with self.subTest(mode=mode, shard=shard):
                     (root / 'fixture-mode').write_text(mode)
                     git('add', '.')
