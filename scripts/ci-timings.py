@@ -180,7 +180,15 @@ def workflow_shards(blob, expected_sha):
     for line in lines[starts[0]+1:]:
         if line.strip() and line.startswith('  ') and not line.startswith('    '): break
         block.append(line)
-    matrices = [m for line in block if (m := re.fullmatch(r'        shard: \[([a-z, -]+)\]', line))]
+    matrices, strategy, matrix = [], False, False
+    for line in block:
+        if not line.strip() or line.lstrip().startswith('#'): continue
+        if re.match(r'^    \S', line):
+            strategy, matrix = line == '    strategy:', False
+        elif re.match(r'^      \S', line):
+            matrix = strategy and line == '      matrix:'
+        elif matrix and (match := re.fullmatch(r'        shard: \[([a-z, -]+)\]', line)):
+            matrices.append(match)
     require(len(matrices) == 1, 'workflow must contain one supported literal shard matrix')
     shards = tuple(matrices[0].group(1).split(', '))
     require(len(shards) == len(set(shards)) and

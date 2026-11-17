@@ -176,6 +176,8 @@ class CITimingTests(unittest.TestCase):
                      workflow_blob(('memory', 'jobs', 'other')),
                      workflow_blob(LEGACY_SHARDS + ('jobs',)),
                      workflow_blob(source='jobs:\n  integration:\n    strategy:\n      matrix: ${{ fromJSON(inputs.matrix) }}\n'),
+                     workflow_blob(source='jobs:\n  integration:\n    env:\n      DESCRIPTION: |\n        shard: [memory, jobs, retention, api, other, store]\n    strategy:\n      matrix: ${{ fromJSON(inputs.matrix) }}\n'),
+                     workflow_blob(source='jobs:\n  integration:\n    strategy:\n      DESCRIPTION: |\n        shard: [memory, jobs, retention, api, other, store]\n'),
                      workflow_blob(source='jobs:\n  integration:\n        shard: [memory]\n        shard: [jobs]\n')]
         for blob in malformed:
             with self.subTest(blob=blob), self.assertRaises(ValueError): parse(blob, good['sha'] if blob in malformed[:4] else blob['sha'])
