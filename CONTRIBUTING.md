@@ -39,9 +39,9 @@ complete suite before merging, including for documentation-only PRs.
 
 Automated acceptance runs Python regressions, Go unit tests and vet before DB
 work, then overlaps integration with compilation of the pinned SQL generator.
-Only compiler preparation uses one Go CPU and one build process. Unit tests and
-integration retain their execution settings; integration still owns at most two
-bounded database stacks. E2E, UI builds and source generators start only after
+Only compiler preparation uses one Go CPU and one build process. Unit tests keep
+their execution settings; integration owns at most three bounded database stacks.
+E2E, UI builds and source generators start only after
 both lanes finish; every command result remains required and cancellation waits
 for owned cleanup. The original SQL generation and byte-for-byte drift check
 remain required. A failing command cannot suppress the other lane's results.
@@ -83,11 +83,14 @@ policy, or socket permissions. See the [release checks](docs/operations/release.
 for the loopback, locked-image, and cleanup regression commands.
 
 Each integration batch uses a unique Testcontainers session. The default `./...`
-run overlaps at most two of its three independent stacks; packages within each
-stack still run serially. It waits for every selected batch and propagates any
-failure. Cancellation stops active batches and waits for their owned cleanup.
-Peak database limits are therefore two GiB of memory/tmpfs and two CPUs across
-two stacks, before Go test processes and the bounded memory-test child.
+run balances four independent stacks from measured package durations: the memory
+regression, jobs/retention, remaining packages, and store. The first three start
+together; store starts when a slot is free. Packages within each stack still run
+serially. New packages enter the remaining-packages batch. It waits for every
+selected batch and propagates any failure. Cancellation stops active batches and
+waits for their owned cleanup.
+Peak database limits are therefore three GiB of memory/tmpfs and three CPUs across
+three stacks, before Go test processes and the bounded memory-test child.
 The memory regression batch keeps five minutes so its four-minute context can
 report and clean up. Other batches retain three minutes and the same resource
 limits. To select that test, use `scripts/test-integration.sh ./internal/reporting -run '^TestSecurityAggregateMemory$' -timeout 5m`. An explicit `-timeout` overrides

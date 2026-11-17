@@ -179,11 +179,14 @@ bindings, image, and cleanup. Go unit tests reject bypasses such as empty host
 addresses and IPv6 wildcards. The same CI step tests an unreachable socket to
 verify there is no daemon fallback. Sequential create and cleanup tests start the
 next batch without waiting for the previous Ryuk to exit, proving session separation
-and resource ownership. An overlapping-lease regression also checks that data and
-cleanup in one owned database cannot affect another. Full integration overlaps at
-most two of its three existing batches, preserving each stack's resource caps and
-serial Go package execution. Every selected batch must pass; nonzero exits do not
-cancel the remaining selected tests. Cancellation waits for active batches to
+and resource ownership. An overlapping-lease regression checks three live stacks,
+their unchanged resource caps, independent data, and cleanup. Full integration
+balances four batches from measured package durations: memory, jobs/retention,
+remaining packages, and store. It starts the first three together and queues store
+for the next free slot, preserving each stack's resource caps and serial Go package
+execution. New packages enter the remaining-packages batch; a missing required
+isolated group fails before execution. Every selected batch must pass; nonzero
+exits do not cancel the remaining selected tests. Cancellation waits for active batches to
 release their own resources. Public phase timings retain the original batch order.
 If startup or test failure coincides with cleanup failure,
 the original error stays primary and public output adds a fixed sanitized category.
@@ -196,11 +199,20 @@ to plan protected data, report copies, WAL, backup, and restore space.
 
 ## Public diagnostics
 
-Integration and E2E `CI_CHECK` summaries also expose up to 15 phase timings per
+Integration and E2E `CI_CHECK` summaries also expose up to 20 phase timings per
 command: PostgreSQL startup, bootstrap, migrations, tests, and cleanup. These
 contain only fixed phase names and bounded integer milliseconds, without database
 URLs, credentials, container identifiers, commands, or runtime output. Timings
 are diagnostic only and never change pass/fail decisions.
+
+Those summaries also project up to 64 package timings from validated private
+batch logs. Each row contains a batch ordinal, a package name derived from tracked
+Go source directories, and the Go reporter's elapsed time rounded to milliseconds
+(bounded to 20 minutes). Test/subtest events, unknown packages, malformed values,
+ambiguous duplicate package results, and paths outside `.local` are excluded from
+this diagnostic projection. Raw events and runtime output stay private. Package
+times are separate observations, not additive wall time across concurrent batches;
+their presence never changes command or acceptance status.
 
 Automated acceptance prints `CI_CHECK` status per command and source-defined failed
 test names, files, lines, and fixed categories. It reports process return codes

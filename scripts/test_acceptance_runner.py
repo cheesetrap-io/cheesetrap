@@ -19,6 +19,67 @@ runner = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(runner)
 
 class AcceptanceGateTests(unittest.TestCase):
+    def test_package_timings_publish_only_source_packages_and_never_change_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / '.local').mkdir()
+            source = 'internal/known/fixture_test.go'
+            (root / source).parent.mkdir(parents=True)
+            (root / source).write_text('package known\nfunc TestKnown(t *testing.T) {}\n')
+            package = 'cheesetrap/internal/known'
+            event = dict(Action='pass', Package=package, Elapsed=1.25)
+            (root / '.local/batch1.jsonl').write_text('\n'.join(map(json.dumps, [
+                event, dict(event, Test='TestKnown/private-runtime-canary', Elapsed=0.1),
+                dict(event, Package='cheesetrap/private-runtime-canary'),
+                dict(Action='output', Package=package, Output='private-runtime-canary'),
+                dict(event, Elapsed=True), dict(event, Elapsed=-1), dict(event, Elapsed=1200.1),
+                dict(event, Elapsed=float('nan')), dict(event, Elapsed=float('inf')),
+                ['private-runtime-canary'], None,
+            ])))
+            (root / '.local/batch2.jsonl').write_text(json.dumps(dict(event, Elapsed=2.5)))
+            (root / 'outside.jsonl').write_text(json.dumps(dict(event, Elapsed=9)))
+            (root / '.local/alias.jsonl').symlink_to(root / 'outside.jsonl')
+            (root / '.local/integration.log').write_text('owned integration project cleanup failed\n')
+            for status in ('PASS', 'FAIL'):
+                captured = io.StringIO()
+                with self.subTest(status=status), mock.patch.object(runner, 'ROOT', root), \
+                     mock.patch.object(runner.subprocess, 'check_output', return_value=(source+'\0').encode()), \
+                     contextlib.redirect_stdout(captured):
+                    runner.print_public_summary([{
+                        'name': 'integration', 'status': status, 'log': '.local/integration.log',
+                        'test_logs': ['.local/batch1.jsonl', '.local/batch2.jsonl',
+                                      '.local/../outside.jsonl', '.local/alias.jsonl'],
+                    }])
+                row = json.loads(captured.getvalue().removeprefix('CI_CHECK '))
+                self.assertEqual(row.get('package_timings'), [
+                    dict(batch=1, package=package, elapsed_ms=1250),
+                    dict(batch=2, package=package, elapsed_ms=2500),
+                ])
+                self.assertEqual(row['status'], status)
+                self.assertNotIn('private-runtime-canary', captured.getvalue())
+                self.assertNotIn('outside.jsonl', captured.getvalue())
+
+    def test_package_timings_omit_ambiguity_and_bound_public_rows(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / '.local').mkdir()
+            sources = {f'internal/p{n:02}/fixture.go': '' for n in range(66)}
+            events = [dict(Action='pass', Package=f'cheesetrap/internal/p{n:02}', Elapsed=0)
+                      for n in range(66)]
+            events += [dict(events[0], Elapsed=1), dict(events[1], Elapsed=2)]
+            (root / '.local/batch.jsonl').write_text('\n'.join(map(json.dumps, events)))
+            with mock.patch.object(runner, 'ROOT', root):
+                rows = runner.public_package_timings(['.local/batch.jsonl'], sources)
+                self.assertEqual(rows, [
+                    dict(batch=1, package=f'cheesetrap/internal/p{n:02}', elapsed_ms=0)
+                    for n in range(2, 66)
+                ])
+                # A second valid batch cannot grow the public diagnostic unboundedly.
+                self.assertEqual(runner.public_package_timings(
+                    ['.local/batch.jsonl', '.local/batch.jsonl'], sources), rows)
+                self.assertEqual(runner.public_package_timings(None, sources), [])
+                self.assertEqual(runner.public_package_timings(['.local/missing.jsonl'], sources), [])
+
     def test_aborted_queued_commands_without_logs_still_report_failure(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -58,8 +119,8 @@ class AcceptanceGateTests(unittest.TestCase):
             self.assertEqual(row, {'command': 'integration', 'status': 'PASS', 'timings': rows[:2]})
             self.assertNotIn('private-runtime-canary', captured.getvalue())
             self.assertEqual(runner.public_integration_timings('INTEGRATION_TIMING not-json\n'), [])
-            repeated = '\n'.join('INTEGRATION_TIMING ' + json.dumps(rows[0]) for _ in range(20))
-            self.assertEqual(len(runner.public_integration_timings(repeated)), 15)
+            repeated = '\n'.join('INTEGRATION_TIMING ' + json.dumps(rows[0]) for _ in range(25))
+            self.assertEqual(len(runner.public_integration_timings(repeated)), 20)
 
     def test_generated_snapshot_detects_model_changes_additions_and_deletions(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -105,19 +166,19 @@ class AcceptanceGateTests(unittest.TestCase):
                                   'tests': [], 'locations': []})
             self.assertNotIn('private-runtime-canary', captured.getvalue())
 
-    def test_harness_merges_three_isolated_batches_and_single_e2e(self):
+    def test_harness_merges_four_isolated_batches_and_single_e2e(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             (root / '.local').mkdir()
             logs, expected = [], set()
-            for n in range(3):
+            for n in range(4):
                 identity = ('cheesetrap/example', f'TestBatch{n}')
                 expected.add(identity)
                 relative = f'.local/batch{n}.jsonl'
                 (root / relative).write_text(json.dumps(dict(Action='pass', Package=identity[0], Test=identity[1])))
                 logs.append(relative)
             output = '\n'.join('PASS: 1 tests; evidence ' + path for path in logs)
-            self.assertEqual(runner.harness_results(output, 0, 3, root), (expected, logs))
+            self.assertEqual(runner.harness_results(output, 0, 4, root), (expected, logs))
             self.assertEqual(runner.harness_results('evidence ' + logs[0], 0, 1, root),
                              ({('cheesetrap/example', 'TestBatch0')}, logs[:1]))
             for case in ('failed-exit', 'missing-batch', 'duplicate', 'missing-file', 'empty', 'fail', 'skip', 'escape'):
@@ -136,7 +197,7 @@ class AcceptanceGateTests(unittest.TestCase):
                         (root / 'outside.jsonl').write_text(original)
                         changed = output.replace(logs[-1], '.local/../outside.jsonl')
                     with self.assertRaises(ValueError):
-                        runner.harness_results(changed, code, 3, root)
+                        runner.harness_results(changed, code, 4, root)
                     path.write_text(original)
 
     def test_public_diagnostics_never_echo_runtime_values(self):
