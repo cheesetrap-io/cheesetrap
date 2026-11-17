@@ -10,6 +10,7 @@ operational procedures and their source.
 | --- | --- |
 | Install | [Linux installation](operations/install.md), [requirements and reference deployments](operations/reference-deployments.md) |
 | Develop and verify | [Contributing and TDD](../CONTRIBUTING.md), [scoped instructions](../AGENTS.md), [generated API contract](../api/openapi.json) |
+| Understand CI scope, checkout identity, and the merge queue | [CI verification scopes](operations/ci.md), [release gates](operations/release.md) |
 | Understand the product | [Product contract](cheesetrap-product-plan.md), [engine selection](decisions/0001-honeypot-engines.md), [evidence storage and contact trust](decisions/0002-streamed-evidence.md), [draft-only decision](decisions/0003-report-drafts-only.md) |
 | Change the UI | [App design and tokens](design-kit.md), [frontend instructions](../web/AGENTS.md) |
 | Prepare a release | [Release procedure](operations/release.md), [security boundary](../SECURITY.md) |
