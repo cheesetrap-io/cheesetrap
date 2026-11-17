@@ -167,6 +167,31 @@ class ReleaseGateTests(unittest.TestCase):
     def test_current_automated_result_keeps_linux_scope_separate(self):
         self.checker.validate_acceptance(self.evidence(), "a" * 40, {"go.mod": "b" * 64})
 
+    def test_ci_web_preparation_is_an_additional_required_success(self):
+        result = self.evidence()
+        result['prepare_web'] = True
+        result['commands'].append(dict(name='web-prepare', status='PASS'))
+        self.checker.validate_acceptance(result, "a" * 40, {"go.mod": "b" * 64})
+        for status in ('FAIL', 'SKIP', '', None):
+            result['commands'][-1]['status'] = status
+            with self.subTest(status=status), self.assertRaisesRegex(ValueError, 'commands'):
+                self.checker.validate_acceptance(result, "a" * 40, {"go.mod": "b" * 64})
+        result['commands'].pop()
+        with self.assertRaisesRegex(ValueError, 'commands'):
+            self.checker.validate_acceptance(result, "a" * 40, {"go.mod": "b" * 64})
+
+    def test_web_preparation_mode_is_explicit_and_boolean(self):
+        for flag in (None, 'true', 1, [], {}):
+            result = self.evidence()
+            result['prepare_web'] = flag
+            with self.subTest(flag=flag), self.assertRaisesRegex(ValueError, 'web preparation'):
+                self.checker.validate_acceptance(result, "a" * 40, {"go.mod": "b" * 64})
+        result['prepare_web'] = False
+        self.checker.validate_acceptance(result, "a" * 40, {"go.mod": "b" * 64})
+        result['commands'].append(dict(name='web-prepare', status='PASS'))
+        with self.assertRaisesRegex(ValueError, 'commands'):
+            self.checker.validate_acceptance(result, "a" * 40, {"go.mod": "b" * 64})
+
     def test_results_from_dirty_checkout_cannot_pass_after_restoring_files(self):
         for field, value in [("tracked_diff_sha256", hashlib.sha256(b"modified tests").hexdigest()),
                              ("tracked_diff_sha256", None), ("checkout_clean", False), ("checkout_clean", None)]:

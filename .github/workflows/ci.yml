@@ -114,17 +114,14 @@ jobs:
           test "$(go env GOVERSION)" = go1.27.4
           test "$(node --version)" = v22.23.1
           test "$(npm --version)" = 10.9.8
-      - name: Prepare locked dependencies and browser (network allowed)
+      - name: Prepare locked Go dependencies (network allowed)
         if: ${{ github.event_name != 'pull_request' || steps.scope.outputs.scope != 'docs' }}
         run: |
           go mod download
           go mod verify
-          npm --prefix web ci --no-audit --no-fund
-          cd web
-          npx --no-install playwright install --with-deps chromium
-      - name: Offline unit, disposable DB integration and UI acceptance
+      - name: Locked web setup, unit, disposable DB integration and UI acceptance
         if: ${{ github.event_name != 'pull_request' || steps.scope.outputs.scope != 'docs' }}
-        run: scripts/test-acceptance.sh --automated-only
+        run: scripts/test-acceptance.sh --automated-only --prepare-web
       - name: Check current automated result
         if: ${{ github.event_name != 'pull_request' || steps.scope.outputs.scope != 'docs' }}
         run: |

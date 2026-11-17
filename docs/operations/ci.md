@@ -22,6 +22,13 @@ results. A failed, cancelled, skipped, missing or unknown result fails the verdi
 Documentation jobs still execute their scope selection; they are not skipped jobs.
 The jobs exchange status results, never private evidence artifacts.
 
+Full acceptance prepares locked npm dependencies and Chromium alongside Python
+regressions, joining both before Go tests and DB work. Setup is a required command
+in the private result. A failed setup stops acceptance before E2E can install
+again. Cancellation stops both owned process groups and waits for cleanup.
+Local acceptance prepares web dependencies this way only when explicitly invoked
+with `--automated-only --prepare-web`.
+
 Any code, configuration, lockfile, instruction, non-regular file, empty diff or
 unknown comparison selects the full suite. Deletions and both sides of renames
 are considered, so renaming a runtime file into a Markdown path cannot hide it.

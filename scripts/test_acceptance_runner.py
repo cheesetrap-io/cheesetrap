@@ -1,4 +1,5 @@
 import copy
+import argparse
 import contextlib
 import hashlib
 import importlib.util
@@ -19,6 +20,122 @@ runner = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(runner)
 
 class AcceptanceGateTests(unittest.TestCase):
+    def exercise_initial_preparation(self, *, prepare_web=True, failed=''):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            coverage = root / 'tests/acceptance/coverage.json'
+            coverage.parent.mkdir(parents=True)
+            coverage.write_bytes((runner.ROOT / 'tests/acceptance/coverage.json').read_bytes())
+            events = []
+
+            def independent(groups, **kwargs):
+                events.append([[row['name'] for row in group] for group in groups])
+                for group in groups:
+                    for row in group:
+                        row.update(status='FAIL' if row['name'] == failed else 'PASS',
+                                   returncode=9 if row['name'] == failed else 0, process_status='exited')
+
+            def command(argv, **kwargs):
+                events.append(argv)
+                if argv[0] == 'go':
+                    raise runner.AcceptanceTimeout('fixture stops after initial barrier')
+                kwargs['log'].write_text('')
+                return 0
+
+            args = argparse.Namespace(prepare_web=prepare_web, automated_only=True, linux_evidence=None)
+            with mock.patch.object(runner, 'ROOT', root), \
+                 mock.patch.dict(os.environ, {'PATH': os.environ['PATH']}, clear=True), \
+                 mock.patch.object(runner.argparse.ArgumentParser, 'parse_args', return_value=args), \
+                 mock.patch.object(runner, 'install_signal_handlers'), \
+                 mock.patch.object(runner.os, 'umask'), \
+                 mock.patch.object(runner, 'checkout_is_clean', return_value=True), \
+                 mock.patch.object(runner, 'production_sources', return_value={}), \
+                 mock.patch.object(runner.subprocess, 'check_output', side_effect=['a' * 40, b'']), \
+                 mock.patch.object(runner, 'print_public_summary'), \
+                 mock.patch.object(runner, 'run_independent', side_effect=independent), \
+                 mock.patch.object(runner, 'run_command', side_effect=command), \
+                 contextlib.redirect_stdout(io.StringIO()):
+                with self.assertRaises((ValueError, runner.AcceptanceTimeout)):
+                    runner.main()
+            result = json.loads(next((root / '.local/acceptance').glob('*/results.json')).read_text())
+            return events, result
+
+    def test_ci_initial_preparation_joins_both_results_before_go(self):
+        for failed in ('', 'runner-tests'):
+            with self.subTest(failed=failed):
+                events, result = self.exercise_initial_preparation(failed=failed)
+                self.assertEqual(events, [[['runner-tests'], ['web-prepare']],
+                                          ['go', 'test', './...', '-count=1', '-json']])
+                statuses = {row['name']: row['status'] for row in result['commands']}
+                self.assertEqual(statuses['web-prepare'], 'PASS')
+                self.assertEqual(statuses['runner-tests'], 'FAIL' if failed else 'PASS')
+                self.assertIs(result['prepare_web'], True)
+                if failed:
+                    self.assertEqual(runner.run_status([], result['commands'][:2], True), 'FAIL')
+
+    def test_failed_web_preparation_aborts_without_install_retry_or_e2e(self):
+        events, result = self.exercise_initial_preparation(failed='web-prepare')
+        self.assertEqual(events, [[['runner-tests'], ['web-prepare']]])
+        self.assertEqual([(r['name'], r['status']) for r in result['commands']],
+                         [('runner-tests', 'PASS'), ('web-prepare', 'FAIL')])
+        self.assertEqual(result['status'], 'FAIL')
+        self.assertIs(result['aborted'], True)
+        self.assertIn('web preparation failed', result['reason'])
+
+    def test_local_prepared_acceptance_keeps_existing_initial_commands(self):
+        events, result = self.exercise_initial_preparation(prepare_web=False)
+        self.assertEqual(events, [['python3', '-B', 'scripts/test-python.py', 'regression'],
+                                  ['go', 'test', './...', '-count=1', '-json']])
+        self.assertNotIn('web-prepare', [r['name'] for r in result['commands']])
+
+    def test_web_preparation_requires_explicit_ci_mode(self):
+        for arguments in ([], ['--linux-evidence', '/nonexistent/fixture.json']):
+            with self.subTest(arguments=arguments):
+                result = subprocess.run([sys.executable, '-B', str(runner.ROOT / 'scripts/test-acceptance.py'),
+                                         '--prepare-web', *arguments], capture_output=True, text=True, timeout=5)
+                self.assertEqual(result.returncode, 2)
+                self.assertIn('--prepare-web requires --automated-only', result.stderr)
+
+    def test_web_preparation_public_verdict_cannot_hide_failure(self):
+        output = io.StringIO()
+        with mock.patch.object(runner.subprocess, 'check_output', return_value=b''), \
+             contextlib.redirect_stdout(output):
+            runner.print_public_summary([dict(name='web-prepare', status='FAIL')])
+        self.assertEqual(json.loads(output.getvalue().removeprefix('CI_CHECK ')),
+                         dict(command='web-prepare', status='FAIL', categories=[], locations=[], tests=[]))
+
+    def test_locked_web_setup_order_and_failure_stop_without_retry(self):
+        script = runner.ROOT / 'scripts/prepare-ci-web.sh'
+        self.assertTrue(script.is_file(), 'CI web setup needs an owned fail-fast command')
+        for failed, expected, code in [('', ['npm', 'npx'], 0), ('npm', ['npm'], 9),
+                                       ('npx', ['npm', 'npx'], 9)]:
+            with self.subTest(failed=failed), tempfile.TemporaryDirectory(prefix='ci web ') as directory:
+                root = Path(directory)
+                (root / 'bin').mkdir()
+                (root / 'scripts').mkdir()
+                (root / 'web').mkdir()
+                target = root / 'scripts/prepare-ci-web.sh'
+                target.write_bytes(script.read_bytes())
+                for name in ('npm', 'npx'):
+                    executable = root / 'bin' / name
+                    executable.write_text('#!' + sys.executable + '\n' +
+                        'import json, os, pathlib, sys\n' +
+                        'name = pathlib.Path(sys.argv[0]).name\n' +
+                        'with open(os.environ["EVENTS"], "a") as stream:\n' +
+                        ' stream.write(json.dumps([name, os.getcwd(), sys.argv[1:]])+"\\n")\n' +
+                        'sys.exit(9 if os.environ["FAIL"] == name else 0)\n')
+                    executable.chmod(0o700)
+                result = subprocess.run(['sh', str(target)], cwd='/', capture_output=True, text=True,
+                    timeout=5, env=dict(PATH=str(root / 'bin') + os.pathsep + os.environ['PATH'],
+                                        EVENTS=str(root / 'events'), FAIL=failed))
+                self.assertEqual(result.returncode, code, result.stderr)
+                rows = list(map(json.loads, (root / 'events').read_text().splitlines()))
+                self.assertEqual([r[0] for r in rows], expected)
+                self.assertTrue(all(r[1] == str(root / 'web') for r in rows))
+                self.assertEqual(rows[0][2], ['ci', '--no-audit', '--no-fund'])
+                if len(rows) == 2:
+                    self.assertEqual(rows[1][2], ['--no-install', 'playwright', 'install', '--with-deps', 'chromium'])
+
     def test_memory_timings_are_bounded_private_and_never_change_failure(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
