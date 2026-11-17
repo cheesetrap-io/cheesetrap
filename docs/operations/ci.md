@@ -29,6 +29,15 @@ again. Cancellation stops both owned process groups and waits for cleanup.
 Local acceptance prepares web dependencies this way only when explicitly invoked
 with `--automated-only --prepare-web`.
 
+Acceptance also restores a rolling Go build-object cache on top of setup-go's
+dependency cache. Its key includes the OS, architecture, pinned Go version,
+module files and commit. Only a successful master push saves this additional
+cache, after the current automated-result gate passes; PRs and queue candidates
+only read it. A new commit can therefore refresh application objects even when
+the dependency cache already exists. The cache contains only `go env GOCACHE`,
+never private `.local` evidence. Every test still executes with its existing
+flags, including `-count=1`; cached test results do not replace checks.
+
 Any code, configuration, lockfile, instruction, non-regular file, empty diff or
 unknown comparison selects the full suite. Deletions and both sides of renames
 are considered, so renaming a runtime file into a Markdown path cannot hide it.

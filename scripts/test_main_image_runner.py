@@ -1,5 +1,6 @@
 """CLI-level failure and cleanup checks; fake Docker is not image evidence."""
 import json
+import ast
 import os
 from pathlib import Path
 import platform
@@ -255,6 +256,54 @@ class QemuWorkflowTests(unittest.TestCase):
         self.assertIsNotNone(match, name + ' must report a separate job result')
         return match.group(1)
 
+    def test_acceptance_build_cache_is_seeded_only_after_successful_master_checks(self):
+        acceptance = self.ci_job('acceptance')
+        blocks = acceptance.split('      - ')[1:]
+        restore = [b for b in blocks if 'actions/cache/restore@' in b]
+        save = [b for b in blocks if 'actions/cache/save@' in b]
+        self.assertEqual(len(restore), 1, 'acceptance needs a rolling application build-cache reader')
+        self.assertEqual(len(save), 1, 'successful master acceptance must refresh application objects')
+        restore, save = restore[0], save[0]
+        self.assertLess(acceptance.index(restore), acceptance.index('scripts/test-acceptance.sh'))
+        self.assertGreater(acceptance.index(save), acceptance.index('scripts/release-check.sh --acceptance-results'))
+        path = '${{ steps.go-build-cache.outputs.path }}'
+        self.assertIn('go env GOCACHE', acceptance)
+        for step in (restore, save):
+            self.assertIn('path: ' + path, step)
+            self.assertNotIn('.local', step, 'private evidence must never enter the build cache')
+            self.assertNotIn('cache-hit', step.split('with:', 1)[1].split('key:', 1)[0])
+        self.assertIn('1.27.4', restore)
+        self.assertIn("hashFiles('go.mod', 'go.sum')", restore)
+        self.assertIn('${{ github.sha }}', restore, 'new master commits must be able to refresh immutable keys')
+        key = re.search(r'^          key: (.+)$', restore, re.M).group(1)
+        prefix = re.search(r'^          restore-keys: (.+)$', restore, re.M).group(1)
+        self.assertEqual(prefix, key.removesuffix('${{ github.sha }}'))
+        self.assertIn('key: ${{ steps.go-build-restore.outputs.cache-primary-key }}', save)
+
+        # Evaluate the workflow's actual predicate across events, failures and
+        # exact hits. Restrict this small expression to comparisons/booleans.
+        expression = re.search(r'if: \$\{\{ (.+) \}\}', save).group(1)
+        for source, variable in [('success()', 'job_success'), ('github.event_name', 'event'),
+                                 ('github.ref', 'ref'),
+                                 ('steps.go-build-restore.outputs.cache-hit', 'cache_hit')]:
+            expression = expression.replace(source, variable)
+        tree = ast.parse(expression.replace('&&', ' and ').replace('||', ' or '), mode='eval')
+        allowed = (ast.Expression, ast.BoolOp, ast.And, ast.Or, ast.Compare, ast.Eq, ast.NotEq,
+                   ast.Name, ast.Load, ast.Constant)
+        self.assertTrue(all(isinstance(node, allowed) for node in ast.walk(tree)))
+        self.assertTrue({node.id for node in ast.walk(tree) if isinstance(node, ast.Name)} <=
+                        {'job_success', 'event', 'ref', 'cache_hit'})
+        for event in ('push', 'pull_request', 'merge_group', 'workflow_dispatch'):
+            for ref in ('refs/heads/master', 'refs/heads/topic'):
+                for success in (True, False):
+                    for hit in ('true', 'false', ''):
+                        with self.subTest(event=event, ref=ref, success=success, hit=hit):
+                            actual = eval(compile(tree, '<cache-save-condition>', 'eval'),
+                                          {'__builtins__': {}}, dict(job_success=success, event=event,
+                                                                     ref=ref, cache_hit=hit))
+                            self.assertEqual(actual, success and event == 'push' and
+                                             ref == 'refs/heads/master' and hit != 'true')
+
     def test_required_verdict_runs_after_every_independent_job_even_on_failure(self):
         verdict = self.ci_job('automated')
         self.assertIn('needs: [acceptance, testcontainers, engines]', verdict)
@@ -300,14 +349,15 @@ class QemuWorkflowTests(unittest.TestCase):
         self.assertIn('scripts/test-python.py image --image cheesetrap-web:ci', engines)
 
     def test_documentation_scope_cannot_reduce_merge_queue_or_unknown_scope(self):
-        for name, count in [('acceptance', 6), ('testcontainers', 3), ('engines', 2)]:
+        for name, count in [('acceptance', 8), ('testcontainers', 3), ('engines', 2)]:
             workflow = self.ci_job(name)
             self.assertIn('scripts/ci-scope.py', workflow)
             blocks = workflow.split('      - ')[1:]
             guarded = []
             for block in blocks:
                 if any(marker in block for marker in ('actions/checkout@', 'id: scope',
-                                                       'Check documentation PR', 'Explain external gates')):
+                                                       'Check documentation PR', 'Explain external gates',
+                                                       'id: go-build-save')):
                     continue
                 self.assertIn("if: ${{ github.event_name != 'pull_request' || steps.scope.outputs.scope != 'docs' }}", block)
                 guarded.append(block)
