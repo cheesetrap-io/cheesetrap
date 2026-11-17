@@ -221,6 +221,37 @@ class CITimingTests(unittest.TestCase):
                 else:
                     with self.assertRaises(ValueError): M.collect(REPO, 7, 42, read=omitted)
 
+    def test_closed_unmerged_pr_keeps_its_first_failure_with_exact_head_proof(self):
+        for mode in ('valid', 'head', 'repository', 'branch', 'after-close', 'later-cohort', 'required-head'):
+            with self.subTest(mode=mode):
+                read, _ = self.metadata_reader(rerun=True, earlier=mode == 'later-cohort')
+                def closed(path):
+                    data = read(path)
+                    if '/commits/' in path: return []
+                    if path.endswith('/pulls/7'):
+                        data.update(state='closed', merged_at=None)
+                        data['head']['sha'] = '2' * 40 if mode == 'head' else SHA
+                    rows = data.get('workflow_runs', [data]) if isinstance(data, dict) else []
+                    for row in rows:
+                        if 'run_attempt' not in row: continue
+                        row['pull_requests'] = []
+                        if mode == 'repository': row['head_repository']['full_name'] = 'other/project'
+                        if mode == 'branch': row['head_branch'] = 'other'
+                        if mode == 'after-close': row['created_at'] = at(201)
+                    if mode == 'required-head' and '/check-runs/' in path: data['head_sha'] = '2' * 40
+                    return data
+                if mode == 'valid':
+                    try:
+                        result = M.collect(REPO, 7, 42, read=closed)
+                    except ValueError:
+                        self.fail('a closed unmerged first failure with exact PR head proof must remain measurable')
+                    self.assertEqual(result['conclusion'], 'failure')
+                    self.assertEqual(result['pr_to_required_seconds'], 118)
+                    self.assertIs(result['eligible'], True)
+                    self.assertEqual(result['attribution'], 'head-repository-branch-window-and-pr-head')
+                else:
+                    with self.assertRaises(ValueError): M.collect(REPO, 7, 42, read=closed)
+
     def test_github_client_only_issues_get_requests_and_hides_raw_api_errors(self):
         with mock.patch.object(M.subprocess, 'run', return_value=SimpleNamespace(stdout=json.dumps({'ok': True}))) as run:
             self.assertEqual(M.api_get('repos/example/project/actions/runs/42'), {'ok': True})

@@ -134,6 +134,12 @@ can lose native run-to-PR links; in that case it requires the same head reposito
 and branch during the PR's lifetime plus a GitHub commit-to-PR association. The
 record identifies which attribution was used. Incomplete or unsupported metadata
 fails collection instead of supplying a guessed zero or a partial summary.
+For a closed unmerged PR, GitHub can omit both association lists. Only an exact
+40-character PR-head/run-head match can then replace commit association, retaining
+the same repository, branch, PR-lifetime, earliest-cohort and native-check proofs.
+Closed experiments and their first failures remain records; closing a PR does not
+exclude its first result from quantiles. An older head without association proof
+still fails collection.
 
 `pr_to_required_seconds` includes the time from PR creation to workflow creation
 and ends at the latest of the three required contexts' completion timestamps.
