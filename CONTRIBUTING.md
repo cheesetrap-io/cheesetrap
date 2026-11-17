@@ -37,14 +37,16 @@ and dependency checks still run. Any code, configuration, lockfile, unusual path
 unknown comparison selects all checks. The enforced merge queue always runs the
 complete suite before merging, including for documentation-only PRs.
 
-CI runs the source component (`--automated-only --prepare-web --component source`)
-and the complete Go integration component (`--automated-only --component integration`)
-on separate runners. Source checks overlap npm/Chromium preparation with Python
-regressions, then run Go unit/vet, E2E, UI, SQL/OpenAPI generation and drift checks.
-Failed web preparation stops before another E2E install. Integration runs every
+CI runs source (`--automated-only --prepare-web --component source`), browser
+(`--automated-only --prepare-web --component browser`), and complete Go integration
+(`--automated-only --component integration`) components on separate runners.
+Source checks overlap locked npm preparation with Python regressions, then run Go
+unit/vet, UI, SQL/OpenAPI generation and drift checks. Browser prepares Chromium
+and runs the existing Go E2E and browser harness. Failed browser preparation stops
+before another E2E install. Integration runs every
 existing test across five required CI shards on separate runners. Each
 component verifies all its concrete T01–T13 tests and labels requirements owned by
-the other component. A component result cannot pass the complete acceptance gate.
+another component. A component result cannot pass the complete acceptance gate.
 
 Local acceptance without `--component` still runs the complete sequence, including
 SQL compiler preparation alongside integration. Without `--prepare-web`, it uses
@@ -52,7 +54,7 @@ already prepared web dependencies. Unit/test flags stay unchanged; E2E and sourc
 generators wait for local Go work, and cancellation waits for owned cleanup.
 
 CI also runs live Testcontainers regressions and image/engine checks on separate
-runners. The required `automated` verdict waits for all four work jobs and fails
+runners. The required `automated` verdict waits for all five work jobs and fails
 unless every job succeeds, including when work is cancelled or skipped. Each
 runner owns its disposable resources; private evidence is not uploaded between
 jobs. See the [CI guide](docs/operations/ci.md) for scope and result locations.
@@ -99,7 +101,7 @@ shards, each with its own runner and one fresh stack. Every discovered test is
 assigned once; new packages enter the other-packages shard. The required matrix
 uses `fail-fast: false` and never ignores a failed shard. Integration-matrix
 database caps total five GiB of memory/tmpfs and five CPUs across five runners,
-before the unchanged bounded memory-test child. The source E2E and live
+before the unchanged bounded memory-test child. The browser E2E and live
 Testcontainers jobs retain their own existing limits. Local full runs still use
 at most three stacks as described above.
 Peak database limits are therefore three GiB of memory/tmpfs and three CPUs across

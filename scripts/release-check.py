@@ -26,7 +26,8 @@ IMAGE_FILES = ('deploy/Dockerfile', 'deploy/compose.yaml', 'deploy/compose.exter
 ACCEPTANCE_COMMANDS = ('runner-tests', 'go', 'vet', 'sql-prepare', 'integration', 'e2e', 'ui', 'ui-build',
                        'api-schema', 'api-types', 'api-contract', 'sql-schema', 'generated-clean')
 COMPONENT_COMMANDS = {
-    'source': tuple(name for name in ACCEPTANCE_COMMANDS if name != 'integration'),
+    'source': tuple(name for name in ACCEPTANCE_COMMANDS if name not in ('integration', 'e2e')),
+    'browser': ('e2e',),
     'integration': ('integration',),
 }
 INTEGRATION_SHARDS = ('memory', 'jobs', 'retention', 'other', 'store')
@@ -218,11 +219,12 @@ def validate_component(result, revision, sources, component, manifest, shard=Non
     require(shard is None or (component == 'integration' and shard in INTEGRATION_SHARDS), 'invalid integration shard')
     require(result.get('integration_shard') == shard, 'integration shard result requires its explicit matching gate')
     validate_identity(result, revision, sources)
-    validate_commands(result, COMPONENT_COMMANDS[component], allow_web=component == 'source')
-    owned = {'integration'} if component == 'integration' else {'go', 'e2e'}
+    validate_commands(result, COMPONENT_COMMANDS[component], allow_web=component in ('source', 'browser'))
+    owned = {'source': {'go'}, 'browser': {'e2e'}, 'integration': {'integration'}}[component]
     outside = {r['id'] for r in manifest['requirements']
                if not any(t['suite'] in owned and shard_owns(t, shard) for t in r['tests'])
-               and not (component == 'source' and (r.get('browser_tests') or r.get('ui_tests')))}
+               and not (component == 'source' and r.get('ui_tests'))
+               and not (component == 'browser' and r.get('browser_tests'))}
     validate_requirements(result, outside)
     if shard == 'memory':
         tests = result.get('tests')
@@ -247,7 +249,7 @@ def main():
     args = parser.parse_args()
     component = args.component_results[0] if args.component_results else None
     if args.component_results and component not in COMPONENT_COMMANDS:
-        parser.error('component must be source or integration')
+        parser.error('component must be source, browser or integration')
     if args.integration_shard and component != 'integration':
         parser.error('--integration-shard requires integration component results')
     validate_metadata(ROOT)
@@ -265,7 +267,7 @@ def main():
         manifest = read_json(ROOT, 'tests/acceptance/coverage.json')
         acceptance.validate_manifest(manifest)
         validate_component(result, revision, acceptance.production_sources(), component, manifest, args.integration_shard)
-        print('PASS_COMPONENT_GATE: ' + component + '; complete CI requires both components, Testcontainers and engines')
+        print('PASS_COMPONENT_GATE: ' + component + '; complete CI requires source, browser, integration, Testcontainers and engines')
     else:
         validate_acceptance(result, revision, acceptance.production_sources())
         print('PASS_AUTOMATED_GATE: current automated result + metadata; historical Linux/load scopes remain separate; image build requires release record')

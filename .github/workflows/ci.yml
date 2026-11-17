@@ -133,7 +133,7 @@ jobs:
         run: |
           go mod download
           go mod verify
-      - name: Run source, E2E and generated-code component
+      - name: Run source and generated-code component
         if: ${{ github.event_name != 'pull_request' || steps.scope.outputs.scope != 'docs' }}
         run: scripts/test-acceptance.sh --automated-only --prepare-web --component source
       - name: Check current source component result
@@ -157,7 +157,89 @@ jobs:
           if [ "$CI_EVENT" = pull_request ] && [ "$CI_SCOPE" = docs ]; then
             echo 'Documentation-only PR scope: runbook regressions, links and release metadata. Secret and dependency checks remain required. This is not PASS_AUTOMATED; the merge queue must run the complete suite before merge.' >> "$GITHUB_STEP_SUMMARY"
           else
-            echo 'Source component covers Python, Go unit/vet, E2E, UI and generated-code checks. Complete CI also requires the full integration component, Testcontainers and engines. Private evidence stays on its owning runner; actual Linux network and load verification remain separate.' >> "$GITHUB_STEP_SUMMARY"
+            echo 'Source component covers Python, Go unit/vet, UI and generated-code checks. Complete CI also requires browser, all integration shards, Testcontainers and engines. Private evidence stays on its owning runner; actual Linux network and load verification remain separate.' >> "$GITHUB_STEP_SUMMARY"
+          fi
+  browser:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      GOTOOLCHAIN: local
+      GOENV: 'off'
+      GOWORK: 'off'
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Determine verification scope
+        id: scope
+        env:
+          CI_EVENT: ${{ github.event_name }}
+          CI_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          CI_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: python3 -B scripts/ci-scope.py --event "$CI_EVENT" --base "$CI_BASE_SHA" --head "$CI_HEAD_SHA" --fetch-missing
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        if: ${{ github.event_name != 'pull_request' || steps.scope.outputs.scope != 'docs' }}
+        with:
+          go-version: '1.27.4'
+      - name: Locate browser build cache
+        id: go-build-cache
+        if: ${{ github.event_name != 'pull_request' || steps.scope.outputs.scope != 'docs' }}
+        run: |
+          go_build_cache=$(go env GOCACHE)
+          printf 'path=%s\n' "$go_build_cache" >> "$GITHUB_OUTPUT"
+      - name: Restore browser build objects from master
+        id: go-build-restore
+        if: ${{ github.event_name != 'pull_request' || steps.scope.outputs.scope != 'docs' }}
+        uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ${{ steps.go-build-cache.outputs.path }}
+          key: browser-go-build-v1-${{ runner.os }}-${{ runner.arch }}-1.27.4-${{ hashFiles('go.mod', 'go.sum') }}-${{ github.sha }}
+          restore-keys: |
+            browser-go-build-v1-${{ runner.os }}-${{ runner.arch }}-1.27.4-${{ hashFiles('go.mod', 'go.sum') }}-
+            acceptance-go-build-v1-${{ runner.os }}-${{ runner.arch }}-1.27.4-${{ hashFiles('go.mod', 'go.sum') }}-
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        if: ${{ github.event_name != 'pull_request' || steps.scope.outputs.scope != 'docs' }}
+        with:
+          node-version: '22.23.1'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Check release metadata and tool versions
+        if: ${{ github.event_name != 'pull_request' || steps.scope.outputs.scope != 'docs' }}
+        run: |
+          scripts/release-check.sh --metadata-only
+          test "$(go env GOVERSION)" = go1.27.4
+          test "$(node --version)" = v22.23.1
+          test "$(npm --version)" = 10.9.8
+      - name: Prepare locked Go dependencies (network allowed)
+        if: ${{ github.event_name != 'pull_request' || steps.scope.outputs.scope != 'docs' }}
+        run: |
+          go mod download
+          go mod verify
+      - name: Run complete E2E and browser component
+        if: ${{ github.event_name != 'pull_request' || steps.scope.outputs.scope != 'docs' }}
+        run: scripts/test-acceptance.sh --automated-only --prepare-web --component browser
+      - name: Check current browser component result
+        if: ${{ github.event_name != 'pull_request' || steps.scope.outputs.scope != 'docs' }}
+        run: |
+          result=$(python3 -c 'from pathlib import Path; print(max(Path(".local/acceptance").glob("*/results.json")))')
+          scripts/release-check.sh --component-results browser "$result"
+      - name: Refresh browser build objects after successful master browser checks
+        id: go-build-save
+        if: ${{ success() && github.event_name == 'push' && github.ref == 'refs/heads/master' && steps.go-build-restore.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ${{ steps.go-build-cache.outputs.path }}
+          key: ${{ steps.go-build-restore.outputs.cache-primary-key }}
+      - name: Explain external gates
+        if: always()
+        env:
+          CI_EVENT: ${{ github.event_name }}
+          CI_SCOPE: ${{ steps.scope.outputs.scope }}
+        run: |
+          if [ "$CI_EVENT" = pull_request ] && [ "$CI_SCOPE" = docs ]; then
+            echo 'Documentation-only PR scope: E2E and browser checks run on the full merge-queue candidate.' >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo 'Browser component covers every Go E2E and Chromium test through the existing isolated harness. Complete CI also requires source, all integration shards, Testcontainers and engines. Private evidence stays on its owning runner; actual Linux network and load verification remain separate.' >> "$GITHUB_STEP_SUMMARY"
           fi
   integration:
     name: integration (${{ matrix.shard }})
@@ -236,7 +318,7 @@ jobs:
           if [ "$CI_EVENT" = pull_request ] && [ "$CI_SCOPE" = docs ]; then
             echo 'Documentation-only PR scope: full Go integration runs in the enforced merge queue.' >> "$GITHUB_STEP_SUMMARY"
           else
-            echo 'Every integration shard remains required, with independent cleanup and the existing per-stack resource limits. Complete CI requires all five shards, source, Testcontainers and engines. Private evidence is never exchanged between runners.' >> "$GITHUB_STEP_SUMMARY"
+            echo 'Every integration shard remains required, with independent cleanup and the existing per-stack resource limits. Complete CI requires all five shards, source, browser, Testcontainers and engines. Private evidence is never exchanged between runners.' >> "$GITHUB_STEP_SUMMARY"
           fi
   testcontainers:
     runs-on: ubuntu-24.04
@@ -314,7 +396,7 @@ jobs:
             echo 'Both pinned image builds and Python engine boundaries/reactor checks remain required by the automated verdict. Private logs are never uploaded.' >> "$GITHUB_STEP_SUMMARY"
           fi
   automated:
-    needs: [acceptance, integration, testcontainers, engines]
+    needs: [acceptance, browser, integration, testcontainers, engines]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -322,12 +404,13 @@ jobs:
       - name: Require all automated work
         env:
           ACCEPTANCE_RESULT: ${{ needs.acceptance.result }}
+          BROWSER_RESULT: ${{ needs.browser.result }}
           INTEGRATION_RESULT: ${{ needs.integration.result }}
           CONTAINERS_RESULT: ${{ needs.testcontainers.result }}
           ENGINES_RESULT: ${{ needs.engines.result }}
         run: |
           set -euo pipefail
-          if [ "$ACCEPTANCE_RESULT" != success ] || [ "$INTEGRATION_RESULT" != success ] || [ "$CONTAINERS_RESULT" != success ] || [ "$ENGINES_RESULT" != success ]; then
+          if [ "$ACCEPTANCE_RESULT" != success ] || [ "$BROWSER_RESULT" != success ] || [ "$INTEGRATION_RESULT" != success ] || [ "$CONTAINERS_RESULT" != success ] || [ "$ENGINES_RESULT" != success ]; then
             echo 'CI_VERDICT FAIL'
             exit 1
           fi

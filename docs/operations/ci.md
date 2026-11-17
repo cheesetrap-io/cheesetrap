@@ -8,7 +8,7 @@ and its queued candidate's checks are separate results.
 ## Which checks run
 
 Secret scanning and dependency auditing run for every PR. The `acceptance`,
-`integration`, `testcontainers`, and `engines` jobs run independently on separate runners.
+`browser`, `integration`, `testcontainers`, and `engines` jobs run independently on separate runners.
 Each resolves the complete PR diff and uses a documentation scope only for regular
 Markdown files under `docs/` or root `README.md`/`CONTRIBUTING.md`. `AGENTS.md`
 and unusual paths are excluded. This scope runs operation-doc regressions,
@@ -16,41 +16,45 @@ relative links and release metadata in `acceptance`; the other jobs report the
 reduced scope without building images or creating databases. This scope does not
 claim `PASS_AUTOMATED`.
 
-The required `automated` check waits for all four jobs and runs its verdict even
-after an upstream failure or cancellation. It accepts only four successful job
+The required `automated` check waits for all five jobs and runs its verdict even
+after an upstream failure or cancellation. It accepts only five successful job
 results. A failed, cancelled, skipped, missing or unknown result fails the verdict.
 Documentation jobs still execute their scope selection; they are not skipped jobs.
 The jobs exchange status results, never private evidence artifacts.
 
-The source component prepares locked npm dependencies and Chromium alongside Python
-regressions, joining both before Go tests and DB work. Setup is a required command
-in the private result. A failed setup stops acceptance before E2E can install
-again. Cancellation stops both owned process groups and waits for cleanup.
-Local acceptance prepares web dependencies this way only when explicitly invoked
-with `--automated-only --prepare-web`.
+The source component prepares locked npm dependencies alongside Python regressions,
+joining both before Go tests. It uses `prepare-ci-web.sh --dependencies-only`
+because source tests do not need Chromium. The browser component prepares locked
+npm dependencies, Chromium and system libraries before the existing isolated Go
+E2E/browser harness. Setup is a required command in each private result. A failed
+setup stops before another install. Cancellation stops owned process groups and
+waits for cleanup. Local complete acceptance prepares web dependencies and Chromium
+alongside Python only with `--automated-only --prepare-web`.
 
 The Go integration component is a five-runner matrix: memory, jobs, retention,
 other packages, and store. Every shard owns one fresh bounded PostgreSQL stack;
 new packages enter the other-packages shard. Fail-fast is disabled so one failed
 shard cannot cancel its siblings. The matrix reports success only after every
-shard succeeds. The source component owns Go unit/vet, E2E/browser, UI and all
-generation/drift checks. Each verifies every T01–T13 test belonging to its suites;
+shard succeeds. The source component owns Go unit/vet, UI and all generation/drift
+checks; the browser component owns every Go E2E and browser test. Each verifies
+every T01–T13 test belonging to its suites;
 requirements wholly owned by another component or shard are `OUT_OF_COMPONENT`.
 Only an explicit component-result gate accepts `PASS_COMPONENT`; the complete
-`--acceptance-results` gate rejects it. The strict `automated` join requires both
-components (including all five integration shards) and both other work jobs.
+`--acceptance-results` gate rejects it. The strict `automated` join requires all
+three components (including all five integration shards) and both other work jobs.
 A shard result requires its explicit matching `--integration-shard` gate; the
 memory shard must also report the named memory regression passing. No private
 reports cross runner boundaries. Local acceptance without `--component` retains
 the complete original sequence; unsharded integration retains four local batches.
 
-Both components restore rolling Go build-object caches on top of setup-go's
+All three components restore rolling Go build-object caches on top of setup-go's
 dependency cache. Its key includes the OS, architecture, pinned Go version,
 module files and commit. Only a successful master component saves its cache,
 after its current component-result gate passes; PRs and queue candidates only
 read them. Integration keys include the shard so sibling writers cannot race for
-one immutable key. Each can initially restore the complete integration or
-acceptance cache from master before its own cache is seeded. A commit can refresh objects even when
+one immutable key. Integration can initially restore the complete integration or
+acceptance cache; browser can restore the acceptance cache from master before its
+own cache is seeded. A commit can refresh objects even when
 the dependency cache already exists. The cache contains only `go env GOCACHE`,
 never private `.local` evidence. Every test still executes with its existing
 flags, including `-count=1`; cached test results do not replace checks.
@@ -77,11 +81,12 @@ result is not evidence that the full automated suite ran.
 
 | Job | Full-scope result to inspect |
 | --- | --- |
-| `acceptance` | Python, Go unit/vet, E2E/browser, UI and generated-code checks; `PASS_COMPONENT_GATE: source` |
+| `acceptance` | Python, Go unit/vet, UI and generated-code checks; `PASS_COMPONENT_GATE: source` |
+| `browser` | Every Go E2E and Chromium test; `PASS_COMPONENT_GATE: browser` |
 | `integration (...)` | All five shards, including the bounded memory regression; each has `PASS_COMPONENT_GATE: integration` |
 | `testcontainers` | Live loopback, pinned-image, reaper and independent-cleanup regressions |
 | `engines` | Both pinned image builds and `PASS_PYTHON_IMAGE` |
-| `automated` | `CI_VERDICT PASS` only after all four work jobs succeed |
+| `automated` | `CI_VERDICT PASS` only after all five work jobs succeed |
 
 For a local documentation check, run:
 

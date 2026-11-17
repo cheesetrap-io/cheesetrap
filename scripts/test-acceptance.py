@@ -597,19 +597,21 @@ def integration_shard_for(test):
 
 
 def evaluate_component(manifest, suites, component, shard=None):
-    """Complementary CI gates; neither result represents complete acceptance."""
+    """Complementary CI gates; no component represents complete acceptance."""
     validate_manifest(manifest)
-    if component not in ('source', 'integration'):
+    if component not in ('source', 'browser', 'integration'):
         raise ValueError('unknown acceptance component')
     if shard is not None and (component != 'integration' or shard not in INTEGRATION_SHARDS):
         raise ValueError('unknown or misplaced integration shard')
-    owned = {'integration'} if component == 'integration' else {'go', 'e2e'}
+    owned = {'source': {'go'}, 'browser': {'e2e'}, 'integration': {'integration'}}[component]
     filtered, outside = [], set()
     for original in manifest['requirements']:
         row = dict(original, tests=[test for test in original['tests'] if test['suite'] in owned
                                    and (shard is None or integration_shard_for(test) == shard)])
-        if component == 'integration':
-            row.update(browser_tests=[], ui_tests=[])
+        if component != 'browser':
+            row['browser_tests'] = []
+        if component != 'source':
+            row['ui_tests'] = []
         if not row['tests'] and not row.get('browser_tests') and not row.get('ui_tests'):
             outside.add(row['id'])
         filtered.append(row)
@@ -637,8 +639,8 @@ def main():
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument('--linux-evidence', type=Path)
     mode.add_argument('--automated-only', action='store_true', help='CI checks only; never asserts full Linux acceptance')
-    parser.add_argument('--prepare-web', action='store_true', help='prepare locked web dependencies and Chromium alongside Python regressions (CI only)')
-    parser.add_argument('--component', choices=('source', 'integration'), help='one complementary CI component; never complete acceptance')
+    parser.add_argument('--prepare-web', action='store_true', help='prepare locked web dependencies and Chromium where needed (CI only)')
+    parser.add_argument('--component', choices=('source', 'browser', 'integration'), help='one complementary CI component; never complete acceptance')
     parser.add_argument('--integration-shard', choices=INTEGRATION_SHARDS, help='one fixed integration shard; complete CI requires every shard')
     args = parser.parse_args()
     if args.prepare_web and not args.automated_only:
@@ -697,12 +699,15 @@ def main():
             record['process_status'] = 'start_failed'
         record.update(status='PASS' if code == 0 else 'FAIL', returncode=code)
         return code, log.read_text(errors='replace') if name != 'ui' and log.exists() else ''
-    if args.component != 'integration':
+    if args.component in (None, 'source'):
         # Keep source tests ahead of DB work: overlapping their Go subprocesses
         # prolonged integration on the measured runner. Their flags stay unchanged.
         if args.prepare_web:
             runner_tests = record_for('runner-tests', ['python3', '-B', 'scripts/test-python.py', 'regression'])
-            web_prepare = record_for('web-prepare', ['./scripts/prepare-ci-web.sh'])
+            web_command = ['./scripts/prepare-ci-web.sh']
+            if args.component == 'source':
+                web_command.append('--dependencies-only')
+            web_prepare = record_for('web-prepare', web_command)
             try:
                 run_independent([[runner_tests], [web_prepare]], env=env)
                 if web_prepare['status'] != 'PASS':
@@ -722,7 +727,13 @@ def main():
             sqlc = json.loads((ROOT / 'deploy/toolchain.lock.json').read_text())['sqlc']
             run('sql-prepare', ['go', 'run', '-p=1', 'github.com/sqlc-dev/sqlc/cmd/sqlc@v' + sqlc, 'version'],
                 childenv=dict(env, GOMAXPROCS='1'))
-    if args.component != 'source':
+    if args.component == 'browser' and args.prepare_web:
+        code, _ = run('web-prepare', ['./scripts/prepare-ci-web.sh'], childenv=dict(env, GOMAXPROCS='1'))
+        if code != 0:
+            error = ValueError('web preparation failed; acceptance stopped before E2E')
+            abort(error)
+            raise error
+    if args.component in (None, 'integration'):
         if args.component == 'integration':
             selection = ['--ci-shard', args.integration_shard] if args.integration_shard else ['./...']
             run('integration', ['./scripts/test-integration.sh', *selection])
@@ -746,7 +757,7 @@ def main():
                 integration['status'] = 'FAIL'
         except (ValueError, OSError):
             integration['status'] = 'FAIL'
-    if args.component != 'integration':
+    if args.component in (None, 'browser'):
         # E2E creates a DB and rebuilds the embedded UI. Generators also mutate Go
         # inputs, so none of that work may overlap the source-only lanes above.
         browser_json = ROOT / '.local/e2e/browser-results.json'
@@ -764,6 +775,7 @@ def main():
             shutil.copyfile(browser_json, preserved)
             commands[-1]['browser_log'] = str(preserved.relative_to(ROOT))
         except (ValueError, OSError, KeyError): commands[-1]['status'] = 'FAIL'
+    if args.component in (None, 'source'):
         ui_json = out / 'ui.json'
         code, _ = run('ui', ['npm', 'run', 'test', '--', '--run', '--includeTaskLocation', '--reporter=json', '--outputFile=' + str(ui_json)], ROOT / 'web', report=ui_json)
         suites['ui'], diagnostics = ui_check(ui_json, code, {}, commands[-1]['process_status'])
