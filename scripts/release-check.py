@@ -23,7 +23,7 @@ REQUIRED = (
     'sensors/web/request_evidence.py', 'sensors/web/patches/request-evidence.patch',
 )
 IMAGE_FILES = ('deploy/Dockerfile', 'deploy/compose.yaml', 'deploy/compose.external-db.yaml', 'deploy/test.compose.yaml', 'sensors/web/Dockerfile')
-ACCEPTANCE_COMMANDS = ('runner-tests', 'go', 'vet', 'integration', 'e2e', 'ui', 'ui-build',
+ACCEPTANCE_COMMANDS = ('runner-tests', 'go', 'vet', 'sql-prepare', 'integration', 'e2e', 'ui', 'ui-build',
                        'api-schema', 'api-types', 'api-contract', 'sql-schema', 'generated-clean')
 
 

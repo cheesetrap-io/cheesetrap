@@ -19,6 +19,19 @@ runner = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(runner)
 
 class AcceptanceGateTests(unittest.TestCase):
+    def test_aborted_queued_commands_without_logs_still_report_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            captured = io.StringIO()
+            with mock.patch.object(runner, 'ROOT', root), \
+                 mock.patch.object(runner.subprocess, 'check_output', return_value=b''), \
+                 contextlib.redirect_stdout(captured):
+                runner.print_public_summary([{'name': name, 'status': 'FAIL', 'log': '.local/absent.log'}
+                                             for name in ('integration', 'go')])
+            rows = [json.loads(line.removeprefix('CI_CHECK ')) for line in captured.getvalue().splitlines()]
+            self.assertEqual([(row['command'], row['status']) for row in rows],
+                             [('integration', 'FAIL'), ('go', 'FAIL')])
+
     def test_integration_summary_exposes_only_bounded_phase_timings(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
