@@ -30,7 +30,7 @@ class IndependentChecksTests(unittest.TestCase):
 root, name = pathlib.Path(sys.argv[1]), sys.argv[2]
 def record(action):
  with (root/'events').open('a') as stream:
-  stream.write(json.dumps([action,name,sys.argv[3:]])+'\\n')
+  stream.write(json.dumps([action,name,sys.argv[3:],os.environ.get('GOMAXPROCS')])+'\\n')
 record('start')
 with socket.socket(socket.AF_UNIX) as connection:
  connection.settimeout(3)
@@ -95,8 +95,10 @@ if name==os.environ.get('FAIL'): sys.exit(9)
         self.assertEqual(errors, [])
         rows = [row for group in self.groups for row in group]
         active, peak, started = set(), 0, []
-        for action, name, flags in map(json.loads, (self.root/'events').read_text().splitlines()):
+        for action, name, flags, cpu in map(json.loads, (self.root/'events').read_text().splitlines()):
             self.assertEqual(flags, ['--keep'])
+            self.assertEqual(cpu, None if name == 'integration' else '1',
+                             'background compiler preparation must leave CPUs for integration')
             if action == 'start':
                 started.append(name)
                 active.add(name)

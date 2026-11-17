@@ -76,7 +76,7 @@ def run_command(command, *, cwd, env, log, timeout, cleanup_timeout=90):
 
 
 def run_independent(groups, *, env, cleanup_timeout=90):
-    """Join two independent command lanes, preserving every exit and owned cleanup."""
+    """Join integration and CPU-bounded preparation, retaining every owned result."""
     if len(groups) != 2 or any(not group for group in groups):
         raise ValueError('exactly two nonempty independent command groups required')
 
@@ -91,14 +91,14 @@ def run_independent(groups, *, env, cleanup_timeout=90):
         except ProcessLookupError: pass
         await asyncio.wait_for(active.wait(), timeout=5)
 
-    async def lane(checks):
+    async def lane(checks, childenv):
         for record in checks:
             print('Running ' + record['name'], flush=True)
             active, finished = None, False
             try:
                 with (ROOT / record['log']).open('w') as stream:
                     active = await asyncio.create_subprocess_exec(
-                        *record['command'], cwd=record['cwd'], env=env, stdin=subprocess.DEVNULL,
+                        *record['command'], cwd=record['cwd'], env=childenv, stdin=subprocess.DEVNULL,
                         stdout=stream, stderr=subprocess.STDOUT, start_new_session=True)
                     code = await asyncio.wait_for(active.wait(), timeout=record['timeout'])
                     finished = True
@@ -116,7 +116,10 @@ def run_independent(groups, *, env, cleanup_timeout=90):
                     await stop(active)
 
     async def execute():
-        tasks = [asyncio.create_task(lane(group)) for group in groups]
+        # Only the second lane prepares a compiler. Unit tests and the
+        # integration runner retain their original execution settings.
+        tasks = [asyncio.create_task(lane(groups[0], env)),
+                 asyncio.create_task(lane(groups[1], dict(env, GOMAXPROCS='1')))]
         try:
             await asyncio.gather(*tasks)
         finally:
@@ -572,23 +575,23 @@ def main():
             record['process_status'] = 'start_failed'
         record.update(status='PASS' if code == 0 else 'FAIL', returncode=code)
         return code, log.read_text(errors='replace') if name != 'ui' and log.exists() else ''
-    # These checks only read source. The integration lane still owns at most
-    # two DB stacks. Keep Go processes within the other lane sequential.
-    python = record_for('runner-tests', ['python3', '-B', 'scripts/test-python.py', 'regression'])
-    go = record_for('go', ['go', 'test', './...', '-count=1', '-json'])
-    vet = record_for('vet', ['go', 'vet', './...'])
+    # Keep source tests ahead of DB work: overlapping their Go subprocesses
+    # prolonged integration on the measured runner. Their flags stay unchanged.
+    run('runner-tests', ['python3', '-B', 'scripts/test-python.py', 'regression'])
+    code, output = run('go', ['go', 'test', './...', '-count=1', '-json'])
+    suites['go'], errors = go_results(output)
+    if errors: commands[-1]['status'] = 'FAIL'
+    run('vet', ['go', 'vet', './...'])
     sqlc = json.loads((ROOT / 'deploy/toolchain.lock.json').read_text())['sqlc']
     # Go caches the pinned tool executable. Compile it without generating any
     # source while integration runs; the original generation/drift gate follows.
-    sql_prepare = record_for('sql-prepare', ['go', 'run', 'github.com/sqlc-dev/sqlc/cmd/sqlc@v' + sqlc, 'version'])
+    sql_prepare = record_for('sql-prepare', ['go', 'run', '-p=1', 'github.com/sqlc-dev/sqlc/cmd/sqlc@v' + sqlc, 'version'])
     integration = record_for('integration', ['./scripts/test-integration.sh', './...'])
     try:
-        run_independent([[integration], [python, go, vet, sql_prepare]], env=env)
+        run_independent([[integration], [sql_prepare]], env=env)
     except (AcceptanceInterrupted, AcceptanceTimeout) as error:
         abort(error)
         raise
-    suites['go'], errors = go_results((ROOT / go['log']).read_text(errors='replace') if (ROOT / go['log']).exists() else '')
-    if errors: go['status'] = 'FAIL'
     try:
         output = (ROOT / integration['log']).read_text(errors='replace')
         suites['integration'], logs = harness_results(output, integration['returncode'], 3)

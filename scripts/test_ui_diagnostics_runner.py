@@ -157,7 +157,9 @@ class UIDiagnosticsTests(unittest.TestCase):
                 (root / 'tests/acceptance/coverage.json').write_text('{}')
                 browser = root / '.local/e2e/browser-results.json'
                 browser.parent.mkdir(parents=True)
+                completed = []
                 def command(argv, *, log, **kwargs):
+                    completed.append(log.stem)
                     log.write_bytes(self.canary.encode() + b'\xff')
                     if log.stem == 'e2e': browser.write_text('{}')
                     if log.stem != 'ui': return 0
@@ -170,6 +172,10 @@ class UIDiagnosticsTests(unittest.TestCase):
                         report.write_text(json.dumps(self.document({'assertion': 'failed', 'skip': 'pending'}.get(outcome, 'passed'))))
                     return 9 if outcome == 'pretest' else 1 if outcome == 'assertion' else 0
                 def independent(groups, *, env):
+                    self.assertEqual(completed, ['runner-tests', 'go', 'vet'],
+                                     'source tests must finish before DB/compiler overlap starts')
+                    self.assertEqual([[record['name'] for record in group] for group in groups],
+                                     [['integration'], ['sql-prepare']])
                     # This test isolates UI verdicts; real parallel execution,
                     # exits and cleanup have separate owned-process regressions.
                     for group in groups:
