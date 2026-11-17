@@ -286,6 +286,8 @@ class QemuWorkflowTests(unittest.TestCase):
             self.assertIn('${{ matrix.shard }}', key, 'matrix writers must never race for one immutable key')
             legacy = prefix.replace('integration-${{ matrix.shard }}-go-build', 'integration-go-build')
             self.assertTrue(set(prefixes) <= {prefix, legacy, legacy.replace('integration-go-build', 'acceptance-go-build')})
+        elif job == 'browser':
+            self.assertEqual(prefixes, [prefix, prefix.replace('browser-go-build', 'acceptance-go-build')])
         else:
             self.assertEqual(prefixes, [prefix])
         self.assertIn('key: ${{ steps.go-build-restore.outputs.cache-primary-key }}', save)
@@ -320,6 +322,9 @@ class QemuWorkflowTests(unittest.TestCase):
     def test_integration_build_cache_is_seeded_only_after_successful_master_checks(self):
         self.check_master_build_cache('integration', 'integration')
 
+    def test_browser_build_cache_is_seeded_only_after_successful_master_checks(self):
+        self.check_master_build_cache('browser', 'browser')
+
     def test_integration_matrix_requires_every_shard_without_fail_fast_or_ignored_failures(self):
         job = self.ci_job('integration')
         self.assertIn('fail-fast: false', job)
@@ -334,16 +339,17 @@ class QemuWorkflowTests(unittest.TestCase):
 
     def test_required_verdict_runs_after_every_independent_job_even_on_failure(self):
         verdict = self.ci_job('automated')
-        self.assertIn('needs: [acceptance, integration, testcontainers, engines]', verdict)
+        self.assertIn('needs: [acceptance, browser, integration, testcontainers, engines]', verdict)
         self.assertIn('if: always()', verdict)
         self.assertNotIn("contains(needs.*.result, 'failure')", verdict)
         self.assertIn('Require all automated work', verdict)
         for variable, job in [('ACCEPTANCE_RESULT', 'acceptance'),
+                              ('BROWSER_RESULT', 'browser'),
                               ('INTEGRATION_RESULT', 'integration'),
                               ('CONTAINERS_RESULT', 'testcontainers'), ('ENGINES_RESULT', 'engines')]:
             self.assertIn(variable + ': ${{ needs.' + job + '.result }}', verdict)
         script = textwrap.dedent(verdict.split('run: |\n', 1)[1])
-        successful = dict(ACCEPTANCE_RESULT='success', INTEGRATION_RESULT='success',
+        successful = dict(ACCEPTANCE_RESULT='success', BROWSER_RESULT='success', INTEGRATION_RESULT='success',
                           CONTAINERS_RESULT='success', ENGINES_RESULT='success')
         cases = [({}, True)]
         for variable in successful:
@@ -358,7 +364,7 @@ class QemuWorkflowTests(unittest.TestCase):
                 self.assertNotIn('private-runtime-canary', result.stdout + result.stderr)
 
     def test_full_checks_use_independent_runners_without_artifact_exchange(self):
-        for name in ('acceptance', 'integration', 'testcontainers', 'engines'):
+        for name in ('acceptance', 'browser', 'integration', 'testcontainers', 'engines'):
             job = self.ci_job(name)
             self.assertNotIn('    needs:', job)
             self.assertNotRegex(job, re.compile(r'^    if:', re.M))
@@ -373,6 +379,11 @@ class QemuWorkflowTests(unittest.TestCase):
         self.assertIn('scripts/release-check.sh --component-results source "$result"', acceptance)
         self.assertNotIn('scripts/test-testcontainers.py', acceptance)
         self.assertNotIn('docker build', acceptance)
+        browser = self.ci_job('browser')
+        self.assertIn('scripts/test-acceptance.sh --automated-only --prepare-web --component browser', browser)
+        self.assertIn('scripts/release-check.sh --component-results browser "$result"', browser)
+        self.assertIn('acceptance-go-build-v1-', browser, 'reuse master E2E objects before the first browser seed')
+        self.assertNotIn('docker build', browser)
         integration = self.ci_job('integration')
         self.assertIn('scripts/test-acceptance.sh --automated-only --component integration', integration)
         self.assertIn('scripts/release-check.sh --component-results integration "$result"', integration)
@@ -385,7 +396,7 @@ class QemuWorkflowTests(unittest.TestCase):
         self.assertIn('scripts/test-python.py image --image cheesetrap-web:ci', engines)
 
     def test_documentation_scope_cannot_reduce_merge_queue_or_unknown_scope(self):
-        for name, count in [('acceptance', 8), ('integration', 6), ('testcontainers', 3), ('engines', 2)]:
+        for name, count in [('acceptance', 8), ('browser', 8), ('integration', 6), ('testcontainers', 3), ('engines', 2)]:
             workflow = self.ci_job(name)
             self.assertIn('scripts/ci-scope.py', workflow)
             blocks = workflow.split('      - ')[1:]
@@ -442,7 +453,7 @@ class QemuWorkflowTests(unittest.TestCase):
         self.assertEqual(triggers.strip(), 'workflow_dispatch:')
         automatic = (ROOT/'.github/workflows/ci.yml').read_text()
         self.assertEqual(re.findall(r'^  ([a-z-]+):$', automatic.split('\njobs:\n', 1)[1], re.M),
-                         ['secrets', 'dependencies', 'acceptance', 'integration', 'testcontainers', 'engines', 'automated'])
+                         ['secrets', 'dependencies', 'acceptance', 'browser', 'integration', 'testcontainers', 'engines', 'automated'])
         self.assertNotIn('--privileged', automatic)
         self.assertNotIn('setup-qemu-action', automatic)
         self.assertIn('--execution qemu --timeout 60', workflow)

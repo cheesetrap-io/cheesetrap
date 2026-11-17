@@ -33,6 +33,8 @@ class AcceptanceGateTests(unittest.TestCase):
 
             def independent(groups, **kwargs):
                 events.append([[row['name'] for row in group] for group in groups])
+                if component == 'source':
+                    self.assertEqual(groups[1][0]['command'], ['./scripts/prepare-ci-web.sh', '--dependencies-only'])
                 for group in groups:
                     for row in group:
                         row.update(status='FAIL' if row['name'] == failed else 'PASS',
@@ -40,14 +42,14 @@ class AcceptanceGateTests(unittest.TestCase):
 
             def command(argv, **kwargs):
                 events.append(argv)
-                if argv[:3] == ['go', 'run', '-p=1']:
+                if argv[:3] == ['go', 'run', '-p=1'] or argv[0] == './scripts/prepare-ci-web.sh':
                     self.assertEqual(kwargs['env'].get('GOMAXPROCS'), '1', 'SQL preparation keeps its CPU bound')
                 else:
                     self.assertNotIn('GOMAXPROCS', kwargs['env'], 'test execution settings stay unchanged')
                 if argv[0] == stop_at:
                     raise runner.AcceptanceTimeout('fixture stops after initial barrier')
                 kwargs['log'].write_text('')
-                return 0
+                return 9 if argv[0] == './scripts/prepare-ci-web.sh' and failed == 'web-prepare' else 0
 
             args = argparse.Namespace(prepare_web=prepare_web, automated_only=True, linux_evidence=None,
                                       component=component, integration_shard=None)
@@ -69,12 +71,25 @@ class AcceptanceGateTests(unittest.TestCase):
             result = json.loads(next((root / '.local/acceptance').glob('*/results.json')).read_text())
             return events, result
 
-    def test_source_component_reaches_e2e_without_running_go_integration(self):
-        events, result = self.exercise_initial_preparation(component='source', stop_at='./scripts/test-e2e.sh')
-        self.assertEqual(events, [[['runner-tests'], ['web-prepare']],
+    def test_source_component_reaches_ui_without_running_db_harnesses(self):
+        events, result = self.exercise_initial_preparation(component='source', stop_at='npm')
+        self.assertEqual(events[:-1], [[['runner-tests'], ['web-prepare']],
             ['go', 'test', './...', '-count=1', '-json'], ['go', 'vet', './...'],
-            ['go', 'run', '-p=1', 'github.com/sqlc-dev/sqlc/cmd/sqlc@v1.31.1', 'version'], ['./scripts/test-e2e.sh']])
+            ['go', 'run', '-p=1', 'github.com/sqlc-dev/sqlc/cmd/sqlc@v1.31.1', 'version']])
+        self.assertEqual(events[-1][:3], ['npm', 'run', 'test'])
         self.assertEqual(result['component'], 'source')
+
+    def test_browser_component_prepares_once_then_runs_existing_e2e_harness(self):
+        events, result = self.exercise_initial_preparation(component='browser', stop_at='./scripts/test-e2e.sh')
+        self.assertEqual(events, [['./scripts/prepare-ci-web.sh'], ['./scripts/test-e2e.sh']])
+        self.assertEqual(result['component'], 'browser')
+
+    def test_browser_preparation_failure_stops_before_an_e2e_install_attempt(self):
+        events, result = self.exercise_initial_preparation(component='browser', failed='web-prepare',
+                                                          stop_at='./scripts/test-e2e.sh')
+        self.assertEqual(events, [['./scripts/prepare-ci-web.sh']])
+        self.assertEqual([(r['name'], r['status']) for r in result['commands']], [('web-prepare', 'FAIL')])
+        self.assertEqual(result['status'], 'FAIL')
 
     def test_integration_component_only_runs_the_complete_existing_harness(self):
         events, result = self.exercise_initial_preparation(component='integration', prepare_web=False,
@@ -98,7 +113,7 @@ class AcceptanceGateTests(unittest.TestCase):
                     identities.append((name, identity))
         self.assertTrue(callable(getattr(runner, 'evaluate_component', None)),
                         'component gates must validate their concrete coverage')
-        for name in ('source', 'integration'):
+        for name in ('source', 'browser', 'integration'):
             rows = runner.evaluate_component(manifest, suites, name)
             self.assertEqual({r['id'] for r in rows}, {r['id'] for r in manifest['requirements']})
             self.assertFalse(any(r['status'] == 'FAIL' for r in rows))
@@ -106,9 +121,10 @@ class AcceptanceGateTests(unittest.TestCase):
             partial = copy.deepcopy(suites)
             partial[suite].remove(identity)
             with self.subTest(suite=suite, identity=identity):
-                owners = [name for name in ('source', 'integration')
+                owners = [name for name in ('source', 'browser', 'integration')
                           if any(r['status'] == 'FAIL' for r in runner.evaluate_component(manifest, partial, name))]
-                self.assertEqual(owners, ['integration' if suite == 'integration' else 'source'])
+                self.assertEqual(owners, ['integration' if suite == 'integration' else
+                                          'browser' if suite in ('e2e', 'browser') else 'source'])
                 self.assertTrue(any(r['status'] == 'FAIL' for r in runner.evaluate(manifest, partial, {})))
 
     def test_required_integration_entries_belong_to_one_ci_shard(self):
@@ -194,6 +210,74 @@ sys.exit(9 if mode=='process-failed' else 0)
                             capture_output=True, text=True, timeout=10)
                         self.assertEqual(full.returncode, 1, 'partial evidence must never pass complete acceptance')
 
+    def test_browser_cli_and_gate_reject_process_test_and_browser_evidence_failures(self):
+        spec = importlib.util.spec_from_file_location('browser_release', runner.ROOT / 'scripts/release-check.py')
+        checker = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(checker)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name in set(checker.metadata_inputs(runner.ROOT)) | {'.gitignore', 'scripts/test-acceptance.py', 'scripts/release-check.py'}:
+                path = root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes((runner.ROOT / name).read_bytes())
+            manifest = dict(schema=1, requirements=[dict(id=f'T{i:02}', linux=[], tests=[
+                dict(suite='e2e', package='cheesetrap/internal/fixture', name='TestFixture')],
+                browser_tests=[dict(file='e2e/fixture.spec.ts', name='fixture journey')]) for i in range(1, 14)])
+            (root / 'tests/acceptance/coverage.json').write_text(json.dumps(manifest))
+            harness = root / 'scripts/test-e2e.sh'
+            harness.write_text('#!' + sys.executable + '\n' + '''import json, pathlib, sys
+root = pathlib.Path(__file__).resolve().parents[1]
+assert sys.argv[1:] == []
+mode = (root/'fixture-mode').read_text()
+path = root/'.local/fixture/e2e.jsonl'
+path.parent.mkdir(parents=True, exist_ok=True)
+event = dict(Action='fail' if mode=='failed-test' else 'pass', Package='cheesetrap/internal/fixture',
+             Test='TestOther' if mode=='missing-go' else 'TestFixture')
+path.write_text(json.dumps(event)+'\\n'+json.dumps(dict(Action='output', Package=event['Package'],
+                Test=event['Test'], Output='private-runtime-canary'))+'\\n')
+if mode!='missing-evidence': print('PASS: evidence '+str(path.relative_to(root)))
+browser = root/'.local/e2e/browser-results.json'
+browser.parent.mkdir(parents=True, exist_ok=True)
+if mode!='missing-browser':
+ results = [dict(status='skipped' if mode=='skipped-browser' else 'passed')]
+ if mode=='retried-browser': results.append(dict(status='passed'))
+ browser.write_text(json.dumps(dict(specs=[dict(file='e2e/fixture.spec.ts', title='fixture journey',
+      tests=[dict(expectedStatus='passed', status='expected', results=results)])])))
+sys.exit(9 if mode=='process-failed' else 0)
+''')
+            harness.chmod(0o700)
+            env = dict(PATH=os.environ['PATH'], GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL=os.devnull)
+            def git(*arguments):
+                subprocess.run(['git', '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
+                                '-c', 'core.hooksPath=/dev/null', '-c', 'commit.gpgsign=false', *arguments],
+                               cwd=root, env=env, check=True, capture_output=True, timeout=10)
+            git('init', '-q')
+            for mode in ('good', 'failed-test', 'missing-evidence', 'process-failed', 'skipped-browser',
+                         'retried-browser', 'missing-browser', 'missing-go'):
+                with self.subTest(mode=mode):
+                    (root / 'fixture-mode').write_text(mode)
+                    git('add', '.')
+                    git('commit', '-qm', 'fixture ' + mode)
+                    result = subprocess.run([sys.executable, '-B', str(root / 'scripts/test-acceptance.py'),
+                        '--automated-only', '--component', 'browser'], cwd=root, env=env,
+                        capture_output=True, text=True, timeout=10)
+                    self.assertEqual(result.returncode, 0 if mode == 'good' else 1, result.stdout + result.stderr)
+                    self.assertNotIn('private-runtime-canary', result.stdout + result.stderr)
+                    path = max((root / '.local/acceptance').glob('*/results.json'))
+                    report = json.loads(path.read_text())
+                    self.assertEqual(report['status'], 'PASS_COMPONENT' if mode == 'good' else 'FAIL')
+                    self.assertEqual(report['component'], 'browser')
+                    self.assertEqual([c['name'] for c in report['commands']], ['e2e'])
+                    gate = subprocess.run([sys.executable, '-B', str(root / 'scripts/release-check.py'),
+                        '--component-results', 'browser', str(path)], cwd=root, env=env,
+                        capture_output=True, text=True, timeout=10)
+                    self.assertEqual(gate.returncode, 0 if mode == 'good' else 1, gate.stdout + gate.stderr)
+                    if mode == 'good':
+                        full = subprocess.run([sys.executable, '-B', str(root / 'scripts/release-check.py'),
+                            '--acceptance-results', str(path)], cwd=root, env=env,
+                            capture_output=True, text=True, timeout=10)
+                        self.assertEqual(full.returncode, 1, 'browser evidence cannot pass complete acceptance')
+
     def test_ci_initial_preparation_joins_both_results_before_go(self):
         for failed in ('', 'runner-tests'):
             with self.subTest(failed=failed):
@@ -253,8 +337,10 @@ sys.exit(9 if mode=='process-failed' else 0)
     def test_locked_web_setup_order_and_failure_stop_without_retry(self):
         script = runner.ROOT / 'scripts/prepare-ci-web.sh'
         self.assertTrue(script.is_file(), 'CI web setup needs an owned fail-fast command')
-        for failed, expected, code in [('', ['npm', 'npx'], 0), ('npm', ['npm'], 9),
-                                       ('npx', ['npm', 'npx'], 9)]:
+        cases = [([], '', ['npm', 'npx'], 0), ([], 'npm', ['npm'], 9), ([], 'npx', ['npm', 'npx'], 9),
+                 (['--dependencies-only'], '', ['npm'], 0), (['--dependencies-only'], 'npm', ['npm'], 9),
+                 (['--unknown'], '', [], 2)]
+        for arguments, failed, expected, code in cases:
             with self.subTest(failed=failed), tempfile.TemporaryDirectory(prefix='ci web ') as directory:
                 root = Path(directory)
                 (root / 'bin').mkdir()
@@ -271,14 +357,14 @@ sys.exit(9 if mode=='process-failed' else 0)
                         ' stream.write(json.dumps([name, os.getcwd(), sys.argv[1:]])+"\\n")\n' +
                         'sys.exit(9 if os.environ["FAIL"] == name else 0)\n')
                     executable.chmod(0o700)
-                result = subprocess.run(['sh', str(target)], cwd='/', capture_output=True, text=True,
+                result = subprocess.run(['sh', str(target), *arguments], cwd='/', capture_output=True, text=True,
                     timeout=5, env=dict(PATH=str(root / 'bin') + os.pathsep + os.environ['PATH'],
                                         EVENTS=str(root / 'events'), FAIL=failed))
                 self.assertEqual(result.returncode, code, result.stderr)
-                rows = list(map(json.loads, (root / 'events').read_text().splitlines()))
+                rows = list(map(json.loads, (root / 'events').read_text().splitlines())) if (root / 'events').exists() else []
                 self.assertEqual([r[0] for r in rows], expected)
                 self.assertTrue(all(r[1] == str(root / 'web') for r in rows))
-                self.assertEqual(rows[0][2], ['ci', '--no-audit', '--no-fund'])
+                if rows: self.assertEqual(rows[0][2], ['ci', '--no-audit', '--no-fund'])
                 if len(rows) == 2:
                     self.assertEqual(rows[1][2], ['--no-install', 'playwright', 'install', '--with-deps', 'chromium'])
 

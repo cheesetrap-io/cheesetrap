@@ -43,9 +43,9 @@ and `automated`, with no skipped required work accepted by the workflow.
 
 `scripts/test-acceptance.py` owns SQL, OpenAPI, UI type generation, contract and
 generated-diff checks, and the UI build. CI validates its source and complete Go
-integration components through explicit `release-check.sh --component-results`
+integration and browser components through explicit `release-check.sh --component-results`
 gates. The required `automated` verdict accepts only successful source,
-integration, live Testcontainers and engine jobs. Component results never qualify
+browser, integration, live Testcontainers and engine jobs. Component results never qualify
 as complete local acceptance: `release-check.sh --acceptance-results` still
 requires a complete current result from acceptance without `--component`.
 `Build pinned images` builds the AMD64 app image and pinned sensors.

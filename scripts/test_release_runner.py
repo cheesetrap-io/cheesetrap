@@ -192,8 +192,11 @@ class ReleaseGateTests(unittest.TestCase):
                 suites[suite].update((test['file'], test['name']) for test in row.get(suite + '_tests', []))
         self.assertEqual(set().union(*map(set, self.checker.COMPONENT_COMMANDS.values())),
                          set(self.checker.ACCEPTANCE_COMMANDS), 'every original command remains required')
-        self.assertFalse(set(self.checker.COMPONENT_COMMANDS['source']) & set(self.checker.COMPONENT_COMMANDS['integration']))
-        for component, names in [('source', [name for name in self.checker.ACCEPTANCE_COMMANDS if name != 'integration']),
+        for name, commands in self.checker.COMPONENT_COMMANDS.items():
+            others = set().union(*(set(value) for key, value in self.checker.COMPONENT_COMMANDS.items() if key != name))
+            self.assertFalse(set(commands) & others, 'every original command has exactly one owner')
+        for component, names in [('source', [name for name in self.checker.ACCEPTANCE_COMMANDS if name not in ('integration', 'e2e')]),
+                                 ('browser', ['e2e']),
                                  ('integration', ['integration'])]:
             result = self.evidence()
             result.update(status='PASS_COMPONENT', component=component, prepare_web=False,
@@ -223,7 +226,7 @@ class ReleaseGateTests(unittest.TestCase):
                 row['status'] = previous
             result['prepare_web'] = True
             result['commands'].append(dict(name='web-prepare', status='PASS'))
-            if component == 'source': validate(result)
+            if component in ('source', 'browser'): validate(result)
             else:
                 with self.assertRaises(ValueError): validate(result)
 
