@@ -237,7 +237,7 @@ class ReleaseGateTests(unittest.TestCase):
         identities = {(t['package'], t['name']) for r in manifest['requirements'] for t in r['tests']
                       if t['suite'] == 'integration'}
         identities.add(('cheesetrap/internal/reporting', 'TestSecurityAggregateMemory'))
-        for shard in ('memory', 'jobs', 'retention', 'other', 'store'):
+        for shard in ('memory', 'jobs', 'retention', 'api', 'other', 'store'):
             result = self.evidence()
             result.update(status='PASS_COMPONENT', component='integration', integration_shard=shard,
                 commands=[dict(name='integration', status='PASS')],

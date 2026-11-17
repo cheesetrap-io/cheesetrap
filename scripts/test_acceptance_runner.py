@@ -132,7 +132,8 @@ class AcceptanceGateTests(unittest.TestCase):
         self.assertTrue(callable(getattr(runner, 'integration_shard_for', None)), 'shard requirement ownership must be explicit')
         suites = {'integration': {(t['package'], t['name']) for row in manifest['requirements']
                                   for t in row['tests'] if t['suite'] == 'integration'}}
-        names = ('memory', 'jobs', 'retention', 'other', 'store')
+        self.assertEqual(runner.integration_shard_for(dict(package='cheesetrap/internal/api', name='TestReviewFlow')), 'api')
+        names = ('memory', 'jobs', 'retention', 'api', 'other', 'store')
         for identity in suites['integration']:
             partial = {'integration': suites['integration'] - {identity}}
             owners = [name for name in names if any(row['status'] == 'FAIL' for row in

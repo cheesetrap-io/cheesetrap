@@ -183,12 +183,14 @@ class ResultsTests(unittest.TestCase):
     def test_ci_shards_preserve_packages_and_unknown_package_fallback(self):
         self.assertTrue(callable(getattr(RUNNER, 'ci_shards', None)), 'CI needs complete, named integration shards')
         packages = ['./internal/reporting', './internal/jobs', './internal/retention', './internal/store',
-                    './internal/new_package', './tests/acceptance']
+                    './internal/api', './internal/new_package', './tests/acceptance']
         shards = RUNNER.ci_shards(packages, ['-race'])
-        self.assertEqual(set(shards), {'memory', 'jobs', 'retention', 'other', 'store'})
+        self.assertEqual(set(shards), {'memory', 'jobs', 'retention', 'api', 'other', 'store'})
         self.assertEqual(shards['memory'], RUNNER.full_suite_batches(packages, ['-race'])[0])
         self.assertEqual(shards['jobs'], (['./internal/jobs'], ['-race']))
         self.assertEqual(shards['retention'], (['./internal/retention'], ['-race']))
+        self.assertEqual(shards['api'], (['./internal/api'], ['-race']))
+        self.assertNotIn('./internal/api', shards['other'][0])
         self.assertIn('./internal/new_package', shards['other'][0])
         self.assertEqual(shards['store'], (['./internal/store'], ['-race']))
         self.assertEqual(set(p for group, _ in shards.values() for p in group), set(packages))
@@ -196,31 +198,42 @@ class ResultsTests(unittest.TestCase):
     def test_ci_shard_cli_is_fixed_and_rejects_target_or_flag_overrides(self):
         self.assertTrue(callable(getattr(RUNNER, 'ci_shard_argument', None)), 'shard selection must fail closed')
         self.assertIsNone(RUNNER.ci_shard_argument(['./...']))
-        for name in ('memory', 'jobs', 'retention', 'other', 'store'):
+        for name in ('memory', 'jobs', 'retention', 'api', 'other', 'store'):
             self.assertEqual(RUNNER.ci_shard_argument(['--ci-shard', name]), name)
         for argv in (['--ci-shard'], ['--ci-shard', 'unknown'], ['--ci-shard', 'memory', '-timeout', '30m']):
             with self.subTest(argv=argv), self.assertRaises(ValueError): RUNNER.ci_shard_argument(argv)
 
     def test_unlisted_package_integration_failure_is_actually_red(self):
+        self.assert_hidden_go_change_fails('unlisted', 'other')
+
+    def test_api_integration_failure_is_actually_red(self):
+        self.assert_hidden_go_change_fails('api', 'api')
+
+    def test_ci_shards_reject_a_missing_api_package(self):
+        packages = ['./internal/reporting', './internal/jobs', './internal/retention', './internal/store']
+        with self.assertRaisesRegex(ValueError, 'inventory is incomplete'):
+            RUNNER.ci_shards(packages, [])
+
+    def assert_hidden_go_change_fails(self, package_name, shard):
         self.assertTrue(callable(getattr(RUNNER, 'ci_shards', None)), 'unknown packages must enter a CI shard')
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             (root / 'go.mod').write_text('module cheesetrap\n\ngo 1.27.4\n')
             packages = ['./internal/reporting', './internal/jobs', './internal/retention', './internal/store',
-                        './internal/unlisted']
+                        './internal/api', './internal/unlisted']
             for package in packages:
                 path = root / package
                 path.mkdir(parents=True)
                 (path / 'fixture.go').write_text('package ' + path.name + '\n')
-            (root / 'internal/unlisted/hidden_test.go').write_text('//go:build integration\n\npackage unlisted\n' +
+            (root / ('internal/' + package_name + '/hidden_test.go')).write_text('//go:build integration\n\npackage ' + package_name + '\n' +
                 'import "testing"\nfunc TestHidden(t *testing.T) { t.Fatal("synthetic hidden change") }\n')
-            group, flags = RUNNER.ci_shards(packages, [])['other']
+            group, flags = RUNNER.ci_shards(packages, [])[shard]
             result = subprocess.run(['go', 'test', '-tags=integration', '-count=1', '-json', *flags, *group],
                 cwd=root, env=dict(os.environ, GOENV='off', GOWORK='off', GOFLAGS='', GOTOOLCHAIN='local', GOPROXY='off'),
                 capture_output=True, text=True, timeout=30)
             self.assertNotEqual(result.returncode, 0, 'the real Go assertion must fail')
             events = [json.loads(line) for line in result.stdout.splitlines() if line.startswith('{')]
-            self.assertTrue(any(e.get('Action') == 'fail' and e.get('Package') == 'cheesetrap/internal/unlisted'
+            self.assertTrue(any(e.get('Action') == 'fail' and e.get('Package') == 'cheesetrap/internal/' + package_name
                                 and e.get('Test') == 'TestHidden' for e in events), result.stdout + result.stderr)
 
     def test_full_suite_partitions_every_package_and_runs_heavy_case(self):
