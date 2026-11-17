@@ -9,5 +9,5 @@ script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 cd "$script_dir/../web"
 npm ci --no-audit --no-fund
 if "$browser"; then
-  npx --no-install playwright install --with-deps chromium
+  npx --no-install playwright install --with-deps --only-shell chromium
 fi

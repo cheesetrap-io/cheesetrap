@@ -367,7 +367,7 @@ sys.exit(9 if mode=='process-failed' else 0)
                 self.assertTrue(all(r[1] == str(root / 'web') for r in rows))
                 if rows: self.assertEqual(rows[0][2], ['ci', '--no-audit', '--no-fund'])
                 if len(rows) == 2:
-                    self.assertEqual(rows[1][2], ['--no-install', 'playwright', 'install', '--with-deps', 'chromium'])
+                    self.assertEqual(rows[1][2], ['--no-install', 'playwright', 'install', '--with-deps', '--only-shell', 'chromium'])
 
     def test_memory_timings_are_bounded_private_and_never_change_failure(self):
         with tempfile.TemporaryDirectory() as directory:

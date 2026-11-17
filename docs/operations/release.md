@@ -148,7 +148,7 @@ setting change or existing service restart is required.
 
 ```sh
 # Prepare Chromium and system libraries first. Network access is required.
-(cd web && npx --no-install playwright install --with-deps chromium)
+(cd web && npx --no-install playwright install --with-deps --only-shell chromium)
 scripts/test-acceptance.sh --automated-only
 # Use the actual path printed by the runner, not this placeholder.
 scripts/release-check.sh --acceptance-results .local/acceptance/ACTUAL_RUN/results.json

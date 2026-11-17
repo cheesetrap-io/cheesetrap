@@ -178,6 +178,28 @@ except runner.IntegrationInterrupted:
 
 
 class ResultsTests(unittest.TestCase):
+    def test_e2e_installs_only_its_headless_shell_and_fails_before_database_setup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'web').mkdir()
+            calls = []
+            def prepare(command, **kwargs):
+                calls.append(command)
+                self.assertEqual(kwargs['cwd'], root / 'web')
+                return (19, 'synthetic installer failure') if command[0] == 'node' else (0, '')
+            with mock.patch.object(RUNNER, 'ROOT', root), \
+                 mock.patch.object(RUNNER, 'run_command', side_effect=prepare), \
+                 mock.patch.object(RUNNER.signal, 'signal'), \
+                 mock.patch.object(sys, 'argv', ['test-e2e.py']), \
+                 mock.patch.dict(os.environ, {'PATH': os.environ['PATH']}, clear=True), \
+                 contextlib.redirect_stdout(io.StringIO()):
+                with self.assertRaisesRegex(RuntimeError, 'E2E preparation failed'):
+                    RUNNER.main(e2e=True)
+            self.assertEqual(calls, [
+                ['npm', 'ci'], ['npm', 'run', 'build'],
+                ['node', 'node_modules/@playwright/test/cli.js', 'install', '--only-shell', 'chromium'],
+            ])
+
     integration = ("fixture/store", "TestCommitBatch")
 
     def test_ci_shards_preserve_packages_and_unknown_package_fallback(self):
