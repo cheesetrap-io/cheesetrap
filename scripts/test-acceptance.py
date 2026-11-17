@@ -5,6 +5,7 @@ Linux evidence is operator-supplied, never synthesized from Compose/unit tests.
 The JSON and all referenced logs remain private in .local, outside Git.
 """
 import argparse
+import asyncio
 import datetime
 import hashlib
 import json
@@ -72,6 +73,60 @@ def run_command(command, *, cwd, env, log, timeout, cleanup_timeout=90):
         except BaseException:
             stop_command(active, cleanup_timeout)
             raise
+
+
+def run_independent(groups, *, env, cleanup_timeout=90):
+    """Join two independent command lanes, preserving every exit and owned cleanup."""
+    if len(groups) != 2 or any(not group for group in groups):
+        raise ValueError('exactly two nonempty independent command groups required')
+
+    async def stop(active):
+        # Match run_command's existing 90-second cleanup grace. Both lanes
+        # unwind concurrently; cancellation never starts queued work.
+        try: os.killpg(active.pid, signal.SIGTERM)
+        except ProcessLookupError: pass
+        try: await asyncio.wait_for(active.wait(), timeout=cleanup_timeout)
+        except asyncio.TimeoutError: pass
+        try: os.killpg(active.pid, signal.SIGKILL)
+        except ProcessLookupError: pass
+        await asyncio.wait_for(active.wait(), timeout=5)
+
+    async def lane(checks):
+        for record in checks:
+            print('Running ' + record['name'], flush=True)
+            active, finished = None, False
+            try:
+                with (ROOT / record['log']).open('w') as stream:
+                    active = await asyncio.create_subprocess_exec(
+                        *record['command'], cwd=record['cwd'], env=env, stdin=subprocess.DEVNULL,
+                        stdout=stream, stderr=subprocess.STDOUT, start_new_session=True)
+                    code = await asyncio.wait_for(active.wait(), timeout=record['timeout'])
+                    finished = True
+                    record.update(returncode=code, process_status='exited', status='PASS' if code == 0 else 'FAIL')
+            except asyncio.TimeoutError:
+                record.update(status='FAIL', process_status='timed_out')
+                raise AcceptanceTimeout('acceptance command timed out; active harness cleanup requested') from None
+            except OSError:
+                record.update(status='FAIL', process_status='start_failed')
+            except BaseException:
+                record.update(status='FAIL', process_status='interrupted')
+                raise
+            finally:
+                if active is not None and not finished:
+                    await stop(active)
+
+    async def execute():
+        tasks = [asyncio.create_task(lane(group)) for group in groups]
+        try:
+            await asyncio.gather(*tasks)
+        finally:
+            # gather propagates exceptions without cancelling siblings. Stop
+            # and join them explicitly before any aborted result is written.
+            for task in tasks:
+                if not task.done(): task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    asyncio.run(execute())
 
 
 def validate_manifest(manifest):
@@ -354,13 +409,13 @@ def print_public_summary(commands):
     sources = {name: (ROOT / name).read_text() for name in tracked
                if name.endswith(('.go', '.py', '.ts', '.tsx')) and (ROOT / name).is_file()
                and not (ROOT / name).is_symlink()}
-    allowed = {'runner-tests', 'go', 'vet', 'integration', 'e2e', 'ui', 'ui-build',
+    allowed = {'runner-tests', 'go', 'vet', 'sql-prepare', 'integration', 'e2e', 'ui', 'ui-build',
                'api-schema', 'api-types', 'api-contract', 'sql-schema', 'generated-clean'}
     for command in commands:
         name = command['name']
         if name not in allowed: continue
         row = {'command': name, 'status': 'PASS' if command['status'] == 'PASS' else 'FAIL'}
-        if name in ('integration', 'e2e') and command.get('log'):
+        if name in ('integration', 'e2e') and command.get('log') and (ROOT / command['log']).is_file():
             timings = public_integration_timings((ROOT / command['log']).read_text(errors='replace'))
             if timings: row['timings'] = timings
         if name == 'ui':
@@ -370,7 +425,7 @@ def print_public_summary(commands):
             if diagnostics['categories']: row['status'] = 'FAIL'
         elif command['status'] != 'PASS':
             output = ''
-            if command.get('log'):
+            if command.get('log') and (ROOT / command['log']).is_file():
                 output = (ROOT / command['log']).read_text(errors='replace')
                 # Failure runners also name their private JSONL. Read it locally;
                 # never upload it or echo any of its runtime output fields.
@@ -488,50 +543,75 @@ def main():
     env = {k: os.environ[k] for k in ('PATH', 'HOME', 'TMPDIR', 'USER', 'LANG') if k in os.environ}
     env.update(GOENV='off', GOWORK='off', GOFLAGS='', GOTOOLCHAIN='local')
     suites, commands = {}, []
+    def record_for(name, command, cwd=ROOT, timeout=1200, report=None):
+        record = {'name': name, 'command': command, 'status': 'FAIL',
+                  'log': str((out / (name + '.log')).relative_to(ROOT)),
+                  'returncode': None, 'process_status': 'not_started',
+                  'cwd': str(cwd), 'timeout': timeout}
+        if report is not None: record['report'] = str(report.relative_to(ROOT))
+        commands.append(record)
+        return record
+
+    def abort(error):
+        (out / 'results.json').write_text(json.dumps({'schema': 1, 'revision': revision, 'checkout_clean': checkout_clean, 'tracked_diff_sha256': hashlib.sha256(diff).hexdigest(), 'started_at': stamp, 'status': 'FAIL', 'aborted': True, 'reason': str(error), 'commands': commands}, indent=2) + '\n')
+        print_public_summary(commands)
+
     def run(name, command, cwd=ROOT, timeout=1200, report=None):
         print('Running ' + name, flush=True)
         log = out / (name + '.log')
-        record = {'name': name, 'command': command, 'status': 'FAIL', 'log': str(log.relative_to(ROOT)),
-                  'returncode': None, 'process_status': 'exited'}
-        if report is not None: record['report'] = str(report.relative_to(ROOT))
-        commands.append(record)
+        record = record_for(name, command, cwd, timeout, report)
+        record['process_status'] = 'exited'
         try:
             code = run_command(command, cwd=cwd, env=env, log=log, timeout=timeout)
         except (AcceptanceInterrupted, AcceptanceTimeout) as error:
             record.update(reason=str(error), process_status='interrupted' if isinstance(error, AcceptanceInterrupted) else 'timed_out')
-            (out / 'results.json').write_text(json.dumps({'schema': 1, 'revision': revision, 'checkout_clean': checkout_clean, 'tracked_diff_sha256': hashlib.sha256(diff).hexdigest(), 'started_at': stamp, 'status': 'FAIL', 'aborted': True, 'reason': str(error), 'commands': commands}, indent=2) + '\n')
-            print_public_summary(commands)
+            abort(error)
             raise
         except OSError:
             code = None
             record['process_status'] = 'start_failed'
         record.update(status='PASS' if code == 0 else 'FAIL', returncode=code)
         return code, log.read_text(errors='replace') if name != 'ui' and log.exists() else ''
-    # Keep the result key for release-gate compatibility; include every general
-    # Python regression, with required skips and empty collection failing closed.
-    run('runner-tests', ['python3', '-B', 'scripts/test-python.py', 'regression'])
-    code, output = run('go', ['go', 'test', './...', '-count=1', '-json'])
-    suites['go'], errors = go_results(output)
-    if errors: commands[-1]['status'] = 'FAIL'
-    run('vet', ['go', 'vet', './...'])
+    # These checks only read source. The integration lane still owns at most
+    # two DB stacks. Keep Go processes within the other lane sequential.
+    python = record_for('runner-tests', ['python3', '-B', 'scripts/test-python.py', 'regression'])
+    go = record_for('go', ['go', 'test', './...', '-count=1', '-json'])
+    vet = record_for('vet', ['go', 'vet', './...'])
+    sqlc = json.loads((ROOT / 'deploy/toolchain.lock.json').read_text())['sqlc']
+    # Go caches the pinned tool executable. Compile it without generating any
+    # source while integration runs; the original generation/drift gate follows.
+    sql_prepare = record_for('sql-prepare', ['go', 'run', 'github.com/sqlc-dev/sqlc/cmd/sqlc@v' + sqlc, 'version'])
+    integration = record_for('integration', ['./scripts/test-integration.sh', './...'])
+    try:
+        run_independent([[integration], [python, go, vet, sql_prepare]], env=env)
+    except (AcceptanceInterrupted, AcceptanceTimeout) as error:
+        abort(error)
+        raise
+    suites['go'], errors = go_results((ROOT / go['log']).read_text(errors='replace') if (ROOT / go['log']).exists() else '')
+    if errors: go['status'] = 'FAIL'
+    try:
+        output = (ROOT / integration['log']).read_text(errors='replace')
+        suites['integration'], logs = harness_results(output, integration['returncode'], 3)
+        integration['test_logs'] = logs
+    except (ValueError, OSError):
+        integration['status'] = 'FAIL'
+    # E2E creates a DB and rebuilds the embedded UI. Generators also mutate Go
+    # inputs, so none of that work may overlap the source-only lanes above.
     browser_json = ROOT / '.local/e2e/browser-results.json'
-    for name, command in [('integration', ['./scripts/test-integration.sh', './...']), ('e2e', ['./scripts/test-e2e.sh'])]:
-        if name == 'e2e': browser_json.unlink(missing_ok=True)
-        code, output = run(name, command)
-        try:
-            # Full integration owns three isolated batches; E2E owns one.
-            suites[name], logs = harness_results(output, code, 3 if name == 'integration' else 1)
-            commands[-1]['test_logs'] = logs
-            if len(logs) == 1: commands[-1]['test_log'] = logs[0]
-        except (ValueError, OSError):
-            commands[-1]['status'] = 'FAIL'
-        if name == 'e2e':
-            try:
-                suites['browser'] = browser_results(json.loads(browser_json.read_text()))
-                preserved = out / 'browser.json'
-                shutil.copyfile(browser_json, preserved)
-                commands[-1]['browser_log'] = str(preserved.relative_to(ROOT))
-            except (ValueError, OSError, KeyError): commands[-1]['status'] = 'FAIL'
+    browser_json.unlink(missing_ok=True)
+    code, output = run('e2e', ['./scripts/test-e2e.sh'])
+    try:
+        suites['e2e'], logs = harness_results(output, code, 1)
+        commands[-1]['test_logs'] = logs
+        if len(logs) == 1: commands[-1]['test_log'] = logs[0]
+    except (ValueError, OSError):
+        commands[-1]['status'] = 'FAIL'
+    try:
+        suites['browser'] = browser_results(json.loads(browser_json.read_text()))
+        preserved = out / 'browser.json'
+        shutil.copyfile(browser_json, preserved)
+        commands[-1]['browser_log'] = str(preserved.relative_to(ROOT))
+    except (ValueError, OSError, KeyError): commands[-1]['status'] = 'FAIL'
     ui_json = out / 'ui.json'
     code, _ = run('ui', ['npm', 'run', 'test', '--', '--run', '--includeTaskLocation', '--reporter=json', '--outputFile=' + str(ui_json)], ROOT / 'web', report=ui_json)
     suites['ui'], diagnostics = ui_check(ui_json, code, {}, commands[-1]['process_status'])

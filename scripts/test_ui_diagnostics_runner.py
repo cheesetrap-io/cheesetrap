@@ -148,9 +148,11 @@ class UIDiagnosticsTests(unittest.TestCase):
 
     def test_main_enforces_ui_gate_and_emits_safe_summary_on_abort(self):
         # Exercise the actual acceptance orchestration without Go/DB/browser work.
-        for outcome in ('pass', 'assertion', 'skip', 'missing', 'malformed', 'pretest', 'start', 'timeout', 'interrupt'):
+        for outcome in ('pass', 'sql-preparation', 'assertion', 'skip', 'missing', 'malformed', 'pretest', 'start', 'timeout', 'interrupt'):
             with self.subTest(outcome=outcome), tempfile.TemporaryDirectory() as temp:
                 root = Path(temp)
+                (root / 'deploy').mkdir()
+                (root / 'deploy/toolchain.lock.json').write_text(json.dumps({'sqlc': '1.31.1'}))
                 (root / 'tests/acceptance').mkdir(parents=True)
                 (root / 'tests/acceptance/coverage.json').write_text('{}')
                 browser = root / '.local/e2e/browser-results.json'
@@ -167,6 +169,15 @@ class UIDiagnosticsTests(unittest.TestCase):
                     elif outcome not in ('missing', 'pretest'):
                         report.write_text(json.dumps(self.document({'assertion': 'failed', 'skip': 'pending'}.get(outcome, 'passed'))))
                     return 9 if outcome == 'pretest' else 1 if outcome == 'assertion' else 0
+                def independent(groups, *, env):
+                    # This test isolates UI verdicts; real parallel execution,
+                    # exits and cleanup have separate owned-process regressions.
+                    for group in groups:
+                        for record in group:
+                            (root / record['log']).write_text('fixture')
+                            record.update(status='PASS', returncode=0, process_status='exited')
+                            if outcome == 'sql-preparation' and record['name'] == 'sql-prepare':
+                                record.update(status='FAIL', returncode=1)
                 captured = io.StringIO()
                 with contextlib.ExitStack() as stack:
                     for name, replacement in {
@@ -176,6 +187,7 @@ class UIDiagnosticsTests(unittest.TestCase):
                         'go_results': lambda _: (set(), []), 'harness_results': lambda *a: (set(), []),
                         'browser_results': lambda _: set(), 'evaluate': lambda *a: [],
                         'run_command': command,
+                        'run_independent': independent,
                     }.items(): stack.enter_context(mock.patch.object(runner, name, replacement))
                     stack.enter_context(mock.patch.dict(os.environ, {}, clear=True))
                     stack.enter_context(mock.patch.object(sys, 'argv', ['test-acceptance.py', '--automated-only']))
@@ -189,7 +201,7 @@ class UIDiagnosticsTests(unittest.TestCase):
                 self.assertNotIn(self.canary, public)
                 rows = [json.loads(line.removeprefix('CI_CHECK ')) for line in public.splitlines() if line.startswith('CI_CHECK ')]
                 ui = next(row for row in rows if row['command'] == 'ui')
-                self.assertEqual(ui['status'], 'PASS' if outcome == 'pass' else 'FAIL')
+                self.assertEqual(ui['status'], 'PASS' if outcome in ('pass', 'sql-preparation') else 'FAIL')
                 if outcome == 'pretest':
                     self.assertEqual(ui['returncode'], 9)
                     self.assertEqual(ui['categories'], ['process_failed', 'ui_report_missing'])

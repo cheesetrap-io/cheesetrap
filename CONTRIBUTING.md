@@ -37,6 +37,14 @@ and dependency checks still run. Any code, configuration, lockfile, unusual path
 unknown comparison selects all checks. The enforced merge queue always runs the
 complete suite before merging, including for documentation-only PRs.
 
+Automated acceptance overlaps integration with one sequential lane of Python
+regressions, Go unit tests, vet and compilation of the pinned SQL generator.
+Integration still owns at most two bounded database stacks. E2E, UI builds and
+source generators start only after both lanes finish; every command result
+remains required and cancellation waits for owned cleanup. The original SQL
+generation and byte-for-byte drift check remain required. A failing command
+cannot suppress the other lane's results.
+
 ## Test a behavior change
 
 1. Choose one observable behavior and run a failing test first. This is the
