@@ -31,7 +31,11 @@ compiler process, UI process, or missing/invalid UI report remains a failure.
 The browser component prepares locked
 npm dependencies, Chromium's headless shell and system libraries before the
 existing isolated Go E2E/browser harness. Setup is a required command in each private result. A failed
-setup stops before another install. Cancellation stops owned process groups and
+setup stops before E2E. Successful setup passes `--prepared-web` to E2E, which
+reuses npm/browser dependencies, rebuilds UI assets and runs the same complete
+Go/browser suite. The explicit component gate still requires the successful
+`web-prepare` command. Without web preparation, E2E retains its independent full
+dependency setup. Cancellation stops owned process groups and
 waits for cleanup. Local complete acceptance prepares web dependencies and Chromium
 alongside Python only with `--automated-only --prepare-web`. Both Playwright
 configurations use headless Chromium without a browser channel or executable

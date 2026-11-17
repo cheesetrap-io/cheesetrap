@@ -758,7 +758,8 @@ def main():
         # inputs, so none of that work may overlap the source-only lanes above.
         browser_json = ROOT / '.local/e2e/browser-results.json'
         browser_json.unlink(missing_ok=True)
-        code, output = run('e2e', ['./scripts/test-e2e.sh'])
+        e2e_command = ['./scripts/test-e2e.sh'] + (['--prepared-web'] if args.prepare_web else [])
+        code, output = run('e2e', e2e_command)
         try:
             suites['e2e'], logs = harness_results(output, code, 1)
             commands[-1]['test_logs'] = logs

@@ -178,6 +178,24 @@ except runner.IntegrationInterrupted:
 
 
 class ResultsTests(unittest.TestCase):
+    def test_prepared_e2e_keeps_ui_build_and_does_not_retry_missing_dependencies(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'web').mkdir()
+            calls = []
+            def missing_dependencies(command, **kwargs):
+                calls.append(command)
+                return 19, 'synthetic missing prepared dependency'
+            with mock.patch.object(RUNNER, 'ROOT', root), \
+                 mock.patch.object(RUNNER, 'run_command', side_effect=missing_dependencies), \
+                 mock.patch.object(RUNNER.signal, 'signal'), \
+                 mock.patch.object(sys, 'argv', ['test-e2e.py', '--prepared-web']), \
+                 mock.patch.dict(os.environ, {'PATH': os.environ['PATH']}, clear=True), \
+                 contextlib.redirect_stdout(io.StringIO()):
+                with self.assertRaisesRegex(RuntimeError, 'E2E preparation failed'):
+                    RUNNER.main(e2e=True)
+            self.assertEqual(calls, [['npm', 'run', 'build']])
+
     def test_e2e_installs_only_its_headless_shell_and_fails_before_database_setup(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -508,10 +526,12 @@ class E2ESafetyTests(unittest.TestCase):
 
 class E2EEntrypointTests(unittest.TestCase):
     def test_rejects_arbitrary_cli_target_before_starting_stack(self):
-        result = subprocess.run([sys.executable, str(Path(__file__).with_name("test-e2e.py")), "https://operational.invalid"], capture_output=True, text=True)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("accepts no targets", result.stderr)
-        self.assertNotIn("Starting isolated", result.stdout)
+        for arguments in (['https://operational.invalid'], ['--prepared-web', 'https://operational.invalid']):
+            with self.subTest(arguments=arguments):
+                result = subprocess.run([sys.executable, str(Path(__file__).with_name("test-e2e.py")), *arguments], capture_output=True, text=True)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("accepts no targets", result.stderr)
+                self.assertNotIn("Starting isolated", result.stdout)
 
     def test_rejects_external_environment_before_install_or_stack(self):
         result = subprocess.run([sys.executable, str(Path(__file__).with_name("test-e2e.py"))], env=dict(os.environ, CHEESETRAP_E2E_URL="http://operational.invalid"), capture_output=True, text=True)

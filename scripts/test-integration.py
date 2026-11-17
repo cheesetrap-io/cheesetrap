@@ -294,8 +294,9 @@ def verify_external_bootstrap(run,docker,container,bootstrap_env,test_env,env):
 
 def main(e2e=False, selection=None):
     os.umask(0o077)
-    if e2e and sys.argv[1:]:
-        raise ValueError("E2E runner accepts no targets or arguments")
+    prepared_web = e2e and sys.argv[1:] == ['--prepared-web']
+    if e2e and sys.argv[1:] and not prepared_web:
+        raise ValueError("E2E runner accepts no targets; only --prepared-web is allowed")
     shard = ci_shard_argument(sys.argv[1:]) if not e2e else None
     packages, flags = (["./..."], []) if shard else selection or arguments(["./tests/acceptance", "./internal/api", "-run", "^(TestReviewFlow|TestHTTPSProxyAuth)$", "-timeout", "5m"] if e2e else sys.argv[1:])
     validate_environment(os.environ)
@@ -316,11 +317,13 @@ def main(e2e=False, selection=None):
     if e2e:
         prepare = ROOT / ".local/e2e"
         prepare.mkdir(parents=True, exist_ok=True)
-        for name, command, timeout in (
-            ("npm-ci", ["npm", "ci"], 180),
-            ("ui-build", ["npm", "run", "build"], 180),
-            ("browser-install", ["node", "node_modules/@playwright/test/cli.js", "install", "--only-shell", "chromium"], 300),
-        ):
+        preparations = [("ui-build", ["npm", "run", "build"], 180)]
+        # Acceptance uses prepared mode only after its required locked npm and
+        # browser/OS setup succeeds. Always rebuild UI assets for release embed.
+        if not prepared_web:
+            preparations.insert(0, ("npm-ci", ["npm", "ci"], 180))
+            preparations.append(("browser-install", ["node", "node_modules/@playwright/test/cli.js", "install", "--only-shell", "chromium"], 300))
+        for name, command, timeout in preparations:
             print("Preparing E2E " + name, flush=True)
             code, output = run_command(command, childenv=env, cwd=ROOT / "web", timeout=timeout, check=False)
             log = prepare / (name + ".log")

@@ -100,8 +100,12 @@ class AcceptanceGateTests(unittest.TestCase):
 
     def test_browser_component_prepares_once_then_runs_existing_e2e_harness(self):
         events, result = self.exercise_initial_preparation(component='browser', stop_at='./scripts/test-e2e.sh')
-        self.assertEqual(events, [['./scripts/prepare-ci-web.sh'], ['./scripts/test-e2e.sh']])
+        self.assertEqual(events, [['./scripts/prepare-ci-web.sh'], ['./scripts/test-e2e.sh', '--prepared-web']])
         self.assertEqual(result['component'], 'browser')
+
+    def test_browser_without_preparation_keeps_the_independent_full_e2e_setup(self):
+        events, _ = self.exercise_initial_preparation(component='browser', prepare_web=False, stop_at='./scripts/test-e2e.sh')
+        self.assertEqual(events, [['./scripts/test-e2e.sh']])
 
     def test_browser_preparation_failure_stops_before_an_e2e_install_attempt(self):
         events, result = self.exercise_initial_preparation(component='browser', failed='web-prepare',
