@@ -139,6 +139,17 @@ type proofWriter struct {
 	q                 *db.Queries
 	report            string
 	offsets, ordinals map[string]int
+	pending           []proofPart
+	pendingBytes      int
+	err               error
+	sealed            bool
+}
+
+type proofPart struct {
+	kind           string
+	ordinal, first int64
+	count          int32
+	payload        []byte
 }
 
 func newProofWriter(ctx context.Context, q *db.Queries, report string) (*proofWriter, error) {
@@ -146,21 +157,70 @@ func newProofWriter(ctx context.Context, q *db.Queries, report string) (*proofWr
 	return &proofWriter{ctx: ctx, q: q, report: report, offsets: map[string]int{}, ordinals: map[string]int{}}, err
 }
 func (w *proofWriter) part(kind string, values any, count int) error {
+	if w.err != nil {
+		return w.err
+	}
+	if w.sealed || count < 0 || count > 32 {
+		w.err = ErrRevisionFailed
+		return w.err
+	}
 	if count == 0 {
 		return nil
 	}
 	data, err := json.Marshal(values)
 	if err != nil {
+		w.err = err
+		return w.err
+	}
+	// Keep every signed part's bytes and boundaries. Only the SQL request is
+	// batched: at most 32 parts and 1 MiB, or one complete oversized part.
+	if len(w.pending) > 0 && w.pendingBytes+len(data) > 1<<20 {
+		if err := w.flush(); err != nil {
+			return err
+		}
+	}
+	w.pending = append(w.pending, proofPart{kind: kind, ordinal: int64(w.ordinals[kind]),
+		first: int64(w.offsets[kind]), count: int32(count), payload: data})
+	w.pendingBytes += len(data)
+	w.ordinals[kind]++
+	w.offsets[kind] += count
+	if len(w.pending) == 32 || w.pendingBytes >= 1<<20 {
+		return w.flush()
+	}
+	return nil
+}
+
+func (w *proofWriter) flush() error {
+	if w.err != nil || len(w.pending) == 0 {
+		return w.err
+	}
+	kinds := make([]string, len(w.pending))
+	ordinals, firsts := make([]int64, len(w.pending)), make([]int64, len(w.pending))
+	counts, payloads := make([]int32, len(w.pending)), make([][]byte, len(w.pending))
+	for i, part := range w.pending {
+		kinds[i], ordinals[i], firsts[i], counts[i], payloads[i] = part.kind, part.ordinal, part.first, part.count, part.payload
+	}
+	tag, err := w.q.Queryer().Exec(w.ctx, `INSERT INTO cheesetrap.report_proof_parts(report_id,kind,ordinal,first_item,item_count,payload)
+SELECT $1::uuid,p.kind,p.ordinal,p.first_item,p.item_count,p.payload
+FROM unnest($2::text[],$3::bigint[],$4::bigint[],$5::integer[],$6::bytea[])
+WITH ORDINALITY AS p(kind,ordinal,first_item,item_count,payload,input_order)
+ORDER BY p.input_order`, w.report, kinds, ordinals, firsts, counts, payloads)
+	if err == nil && tag.RowsAffected() != int64(len(w.pending)) {
+		err = ErrRevisionFailed
+	}
+	if err != nil {
+		w.err = err
 		return err
 	}
-	_, err = w.q.Queryer().Exec(w.ctx, `INSERT INTO cheesetrap.report_proof_parts(report_id,kind,ordinal,first_item,item_count,payload) VALUES($1,$2,$3,$4,$5,$6)`, w.report, kind, w.ordinals[kind], w.offsets[kind], count, data)
-	if err == nil {
-		w.ordinals[kind]++
-		w.offsets[kind] += count
-	}
-	return err
+	clear(w.pending)
+	w.pending = w.pending[:0]
+	w.pendingBytes = 0
+	return nil
 }
 func (w *proofWriter) seal(snapshot *domain.ReportSnapshot) error {
+	if err := w.flush(); err != nil {
+		return err
+	}
 	var data []byte
 	if err := w.q.Queryer().QueryRow(w.ctx, `SELECT cheesetrap.seal_report_proof($1)`, w.report).Scan(&data); err != nil {
 		return err
@@ -173,6 +233,7 @@ func (w *proofWriter) seal(snapshot *domain.ReportSnapshot) error {
 	snapshot.Evidence = nil
 	snapshot.Rules = nil
 	snapshot.Contents = storedContents{ctx: w.ctx, q: w.q, report: w.report, proof: true, evidence: proof.EvidenceCount, rules: proof.RuleCount}
+	w.sealed = true
 	return nil
 }
 

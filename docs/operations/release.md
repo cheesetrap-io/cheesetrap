@@ -222,6 +222,13 @@ fields, malformed values, and ambiguous duplicate phases are omitted. These are
 diagnostics only: raw compiler commands, payloads, DB details and child output
 remain private, and no timing or count changes the acceptance verdict.
 
+Proof writes keep each signed part's exact bytes, order and item boundaries while
+batching SQL requests at 32 parts and 1 MiB, or one complete oversized part. The
+writer flushes the tail before sealing; a write error prevents sealing and remains
+an error until the caller rolls back its transaction. The live regression checks
+stored bytes, the existing PostgreSQL proof hash, and rollback after a later batch
+fails. The full memory regression retains its original fixture and cgroup limits.
+
 Automated acceptance prints `CI_CHECK` status per command and source-defined failed
 test names, files, lines, and fixed categories. It reports process return codes
 separately from report validity. It never publishes dynamic subtest names, runtime
