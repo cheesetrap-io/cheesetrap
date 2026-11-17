@@ -43,18 +43,19 @@ CI runs source (`--automated-only --prepare-web --component source`), browser
 Source checks overlap locked npm preparation with Python regressions, then run Go
 unit/vet. Pinned SQL compiler preparation overlaps UI tests, keeping its existing
 single-CPU Go settings. Both finish before UI build, SQL/OpenAPI generation and
-drift checks. Browser installs the Chromium
-headless shell and required OS libraries, then runs the existing Go E2E and browser
-harness. Failed browser preparation stops before E2E. Successful preparation lets
-E2E reuse those dependencies with `--prepared-web`; its UI build and every test
-still run. Integration
+drift checks. Browser installs the Chromium headless shell and required OS
+libraries while its existing E2E harness prepares one owned test database stack.
+A fresh private status releases UI build and every E2E/browser test only after
+web preparation succeeds. Both command results remain required; a failed setup
+cannot cause a second installation attempt. Failure or cancellation waits for
+owned cleanup. Standalone E2E and `--prepared-web` retain their preparation order. Integration
 runs every existing test across six required CI shards on separate runners. Each
 component verifies all its concrete T01–T13 tests and labels requirements owned by
 another component. A component result cannot pass the complete acceptance gate.
 
 Local acceptance without `--component` still runs the complete sequence, including
-SQL compiler preparation alongside integration. Without `--prepare-web`, it uses
-already prepared web dependencies. Unit/test flags stay unchanged; E2E and source
+SQL compiler preparation alongside integration. Without `--prepare-web`, E2E
+retains its independent dependency setup. Unit/test flags stay unchanged; E2E and source
 generators wait for local Go work, and cancellation waits for owned cleanup.
 
 CI also runs live Testcontainers regressions and image/engine checks on separate

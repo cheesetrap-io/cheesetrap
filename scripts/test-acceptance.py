@@ -80,6 +80,14 @@ def run_independent(groups, *, env, cleanup_timeout=90):
     """Join independent checks and bounded preparation, retaining every owned result."""
     if len(groups) != 2 or any(not group for group in groups):
         raise ValueError('exactly two nonempty independent command groups required')
+    for group in groups:
+        for record in group:
+            if record.get('completion_status'):
+                destination = ROOT / record['completion_status']
+                if not destination.resolve().is_relative_to(ROOT):
+                    raise ValueError('web preparation status must be private')
+                if destination.exists() or destination.is_symlink():
+                    raise ValueError('web preparation status already exists')
 
     async def stop(active):
         # Match run_command's existing 90-second cleanup grace. Both lanes
@@ -115,6 +123,23 @@ def run_independent(groups, *, env, cleanup_timeout=90):
             finally:
                 if active is not None and not finished:
                     await stop(active)
+                if record.get('completion_status'):
+                    destination = ROOT / record['completion_status']
+                    pending = destination.with_name(destination.name + '.pending')
+                    created = False
+                    try:
+                        with pending.open('x') as stream:
+                            created = True
+                            os.chmod(pending, 0o600)
+                            stream.write('PASS\n' if record['status'] == 'PASS' else 'FAIL\n')
+                        # Publish complete content without replacing any existing status.
+                        os.link(pending, destination)
+                    except OSError:
+                        record['status'] = 'FAIL'
+                        raise ValueError('web preparation status could not be published') from None
+                    finally:
+                        if created: pending.unlink(missing_ok=True)
+            print('Completed ' + record['name'], flush=True)
 
     async def execute():
         # Bound Go-based preparation tools in the second lane. Source tests
@@ -723,12 +748,6 @@ def main():
         suites['go'], errors = go_results(output)
         if errors: commands[-1]['status'] = 'FAIL'
         run('vet', ['go', 'vet', './...'])
-    if args.component == 'browser' and args.prepare_web:
-        code, _ = run('web-prepare', ['./scripts/prepare-ci-web.sh'], childenv=dict(env, GOMAXPROCS='1'))
-        if code != 0:
-            error = ValueError('web preparation failed; acceptance stopped before E2E')
-            abort(error)
-            raise error
     if args.component in (None, 'integration'):
         if args.component == 'integration':
             selection = ['--ci-shard', args.integration_shard] if args.integration_shard else ['./...']
@@ -758,8 +777,23 @@ def main():
         # inputs, so none of that work may overlap the source-only lanes above.
         browser_json = ROOT / '.local/e2e/browser-results.json'
         browser_json.unlink(missing_ok=True)
-        e2e_command = ['./scripts/test-e2e.sh'] + (['--prepared-web'] if args.prepare_web else [])
-        code, output = run('e2e', e2e_command)
+        if args.component == 'browser' and args.prepare_web:
+            # The E2E lane owns DB setup while the bounded preparation lane
+            # installs web dependencies. Its private barrier gates UI build/tests.
+            completion = str((out / 'web-preparation.status').relative_to(ROOT))
+            web_prepare = record_for('web-prepare', ['./scripts/prepare-ci-web.sh'])
+            web_prepare['completion_status'] = completion
+            e2e = record_for('e2e', ['./scripts/test-e2e.sh', '--prepared-web-status', completion])
+            try:
+                run_independent([[e2e], [web_prepare]], env=env)
+            except (AcceptanceInterrupted, AcceptanceTimeout, ValueError) as error:
+                abort(error)
+                raise
+            code = e2e['returncode']
+            output = (ROOT / e2e['log']).read_text(errors='replace')
+        else:
+            e2e_command = ['./scripts/test-e2e.sh'] + (['--prepared-web'] if args.prepare_web else [])
+            code, output = run('e2e', e2e_command)
         try:
             suites['e2e'], logs = harness_results(output, code, 1)
             commands[-1]['test_logs'] = logs

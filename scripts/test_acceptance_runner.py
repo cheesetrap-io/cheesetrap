@@ -39,11 +39,15 @@ class AcceptanceGateTests(unittest.TestCase):
                     for row in group:
                         row.update(status='FAIL' if row['name'] == failed else 'PASS',
                                    returncode=9 if row['name'] == failed else 0, process_status='exited')
+                        if component == 'browser':
+                            (root / row['log']).write_text('')
                         if row['name'] == 'ui' and failed != 'missing-ui-report':
                             report = root / row['report']
                             report.write_text('{' if failed == 'invalid-ui-report' else json.dumps({
                                 'success': True, 'testResults': [{'name': 'src/fixture.test.ts', 'status': 'passed',
                                 'assertionResults': [{'title': 'fixture', 'fullName': 'fixture', 'status': 'passed'}]}]}))
+                if component == 'browser' and not failed:
+                    raise runner.AcceptanceTimeout('fixture stops after concurrent browser launch')
 
             def command(argv, **kwargs):
                 events.append(argv)
@@ -71,8 +75,11 @@ class AcceptanceGateTests(unittest.TestCase):
                  mock.patch.object(runner, 'run_independent', side_effect=independent), \
                  mock.patch.object(runner, 'run_command', side_effect=command), \
                  contextlib.redirect_stdout(io.StringIO()):
-                with self.assertRaises((ValueError, runner.AcceptanceTimeout)):
-                    runner.main()
+                if component == 'browser' and failed:
+                    self.assertEqual(runner.main(), 1)
+                else:
+                    with self.assertRaises((ValueError, runner.AcceptanceTimeout)):
+                        runner.main()
             result = json.loads(next((root / '.local/acceptance').glob('*/results.json')).read_text())
             return events, result
 
@@ -98,21 +105,72 @@ class AcceptanceGateTests(unittest.TestCase):
                 self.assertEqual(rows['ui']['status'], 'FAIL' if failed in ('ui', 'missing-ui-report', 'invalid-ui-report') else 'PASS')
                 self.assertEqual(runner.run_status([], list(rows.values()), True), 'FAIL' if failed else 'PASS_AUTOMATED')
 
-    def test_browser_component_prepares_once_then_runs_existing_e2e_harness(self):
+    def test_browser_component_overlaps_web_and_database_preparation(self):
         events, result = self.exercise_initial_preparation(component='browser', stop_at='./scripts/test-e2e.sh')
-        self.assertEqual(events, [['./scripts/prepare-ci-web.sh'], ['./scripts/test-e2e.sh', '--prepared-web']])
+        self.assertEqual(events, [[['e2e'], ['web-prepare']]])
+        web, e2e = result['commands']
+        self.assertEqual(web['command'], ['./scripts/prepare-ci-web.sh'])
+        self.assertEqual(e2e['command'][:2], ['./scripts/test-e2e.sh', '--prepared-web-status'])
+        self.assertEqual(e2e['command'][2], web['completion_status'])
+        self.assertTrue(e2e['command'][2].endswith('/web-preparation.status'))
         self.assertEqual(result['component'], 'browser')
 
     def test_browser_without_preparation_keeps_the_independent_full_e2e_setup(self):
         events, _ = self.exercise_initial_preparation(component='browser', prepare_web=False, stop_at='./scripts/test-e2e.sh')
         self.assertEqual(events, [['./scripts/test-e2e.sh']])
 
-    def test_browser_preparation_failure_stops_before_an_e2e_install_attempt(self):
+    def test_browser_preparation_failure_keeps_both_results_without_e2e_install_retry(self):
         events, result = self.exercise_initial_preparation(component='browser', failed='web-prepare',
                                                           stop_at='./scripts/test-e2e.sh')
-        self.assertEqual(events, [['./scripts/prepare-ci-web.sh']])
-        self.assertEqual([(r['name'], r['status']) for r in result['commands']], [('web-prepare', 'FAIL')])
+        self.assertEqual(events, [[['e2e'], ['web-prepare']]])
+        self.assertEqual([(r['name'], r['status']) for r in result['commands']], [('web-prepare', 'FAIL'), ('e2e', 'FAIL')])
         self.assertEqual(result['status'], 'FAIL')
+
+    def test_parallel_web_completion_releases_database_lane_only_on_success(self):
+        for exit_code in (0, 9):
+            with self.subTest(exit_code=exit_code), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                status, database, tested = root / 'web.status', root / 'database', root / 'tested'
+                def record(name, code, *args):
+                    return dict(name=name, command=[sys.executable, '-c', code, *map(str, args)],
+                                cwd=root, log=name+'.log', timeout=5, status='FAIL')
+                consumer = record('e2e', '''import pathlib,sys,time
+status,database,tested=map(pathlib.Path,sys.argv[1:])
+database.touch()
+deadline=time.monotonic()+2
+while not status.exists() and time.monotonic()<deadline: time.sleep(.01)
+if not status.exists() or status.read_text()!='PASS\\n': sys.exit(11)
+tested.touch()
+''', status, database, tested)
+                producer = record('web-prepare', '''import pathlib,sys,time
+database=pathlib.Path(sys.argv[1])
+deadline=time.monotonic()+2
+while not database.exists() and time.monotonic()<deadline: time.sleep(.01)
+sys.exit(int(sys.argv[2]) if database.exists() else 12)
+''', database, exit_code)
+                producer['completion_status'] = str(status)
+                with mock.patch.object(runner, 'ROOT', root), contextlib.redirect_stdout(io.StringIO()):
+                    runner.run_independent([[consumer], [producer]], env=dict(PATH=os.environ['PATH']))
+                self.assertEqual(producer['returncode'], exit_code)
+                self.assertEqual(consumer['returncode'], 0 if exit_code == 0 else 11)
+                self.assertTrue(status.is_file(), 'the producer must publish its actual terminal result')
+                self.assertEqual(status.read_text(), 'PASS\n' if exit_code == 0 else 'FAIL\n')
+                self.assertEqual(status.stat().st_mode & 0o777, 0o600)
+                self.assertEqual(tested.exists(), exit_code == 0)
+
+    def test_stale_completion_status_cannot_release_a_new_browser_run(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            status = root / 'web.status'
+            status.write_text('PASS\n')
+            row = dict(name='web-prepare', command=['unexpected'], cwd=root, log='web.log',
+                       timeout=5, status='FAIL', completion_status=str(status))
+            with mock.patch.object(runner, 'ROOT', root), \
+                 mock.patch.object(runner.asyncio, 'create_subprocess_exec') as start:
+                with self.assertRaisesRegex(ValueError, 'already exists'):
+                    runner.run_independent([[dict(row, name='e2e', completion_status=None)], [row]], env={})
+                start.assert_not_called()
+            self.assertEqual(status.read_text(), 'PASS\n')
 
     def test_integration_component_only_runs_the_complete_existing_harness(self):
         events, result = self.exercise_initial_preparation(component='integration', prepare_web=False,

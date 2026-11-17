@@ -17,6 +17,7 @@ from pathlib import Path
 import re
 import secrets
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -132,6 +133,61 @@ def validate_environment(environment):
 
 def timing(phase, started):
     print("INTEGRATION_TIMING " + json.dumps({"phase": phase, "elapsed_ms": int((time.monotonic() - started) * 1000)}), flush=True)
+
+
+def web_preparation_path(value):
+    relative = Path(value)
+    path = ROOT / relative
+    if (relative.is_absolute() or '..' in relative.parts or
+            not path.is_relative_to(ROOT / '.local/acceptance') or
+            path.name != 'web-preparation.status' or path.resolve() != path or
+            not path.parent.is_dir()):
+        raise ValueError('web preparation status must be a private acceptance artifact')
+    return path
+
+
+def wait_for_web_preparation(path, timeout=1200):
+    try:
+        path = web_preparation_path(str(Path(path).relative_to(ROOT)))
+    except ValueError:
+        raise ValueError('web preparation status must be a private acceptance artifact') from None
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        except FileNotFoundError:
+            if time.monotonic() >= deadline:
+                raise RuntimeError('web preparation status did not arrive') from None
+            time.sleep(0.05)  # Bounded readiness polling, never a fixed test delay.
+            continue
+        except OSError:
+            raise RuntimeError('invalid web preparation status') from None
+        try:
+            metadata = os.fstat(descriptor)
+            if (not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.geteuid() or
+                    metadata.st_mode & 0o077 or os.read(descriptor, 6) != b'PASS\n'):
+                raise RuntimeError('web preparation did not pass')
+            return
+        finally:
+            os.close(descriptor)
+
+
+def prepare_e2e_web(env, prepared_web):
+    prepare = ROOT / '.local/e2e'
+    prepare.mkdir(parents=True, exist_ok=True)
+    preparations = [('ui-build', ['npm', 'run', 'build'], 180)]
+    if not prepared_web:
+        preparations.insert(0, ('npm-ci', ['npm', 'ci'], 180))
+        preparations.append(('browser-install', ['node', 'node_modules/@playwright/test/cli.js',
+                                               'install', '--only-shell', 'chromium'], 300))
+    for name, command, timeout in preparations:
+        print('Preparing E2E ' + name, flush=True)
+        code, output = run_command(command, childenv=env, cwd=ROOT / 'web', timeout=timeout, check=False)
+        log = prepare / (name + '.log')
+        log.write_text(output)
+        os.chmod(log, 0o600)
+        if code:
+            raise RuntimeError('E2E preparation failed; see ' + str(log.relative_to(ROOT)))
 
 
 def full_suite_batches(packages, flags):
@@ -295,15 +351,18 @@ def verify_external_bootstrap(run,docker,container,bootstrap_env,test_env,env):
 def main(e2e=False, selection=None):
     os.umask(0o077)
     prepared_web = e2e and sys.argv[1:] == ['--prepared-web']
+    web_status = None
     if e2e and sys.argv[1:] and not prepared_web:
-        raise ValueError("E2E runner accepts no targets; only --prepared-web is allowed")
+        if len(sys.argv[1:]) == 2 and sys.argv[1] == '--prepared-web-status':
+            web_status = web_preparation_path(sys.argv[2])
+        else:
+            raise ValueError('E2E runner accepts no targets; only --prepared-web or --prepared-web-status PATH')
     shard = ci_shard_argument(sys.argv[1:]) if not e2e else None
     packages, flags = (["./..."], []) if shard else selection or arguments(["./tests/acceptance", "./internal/api", "-run", "^(TestReviewFlow|TestHTTPSProxyAuth)$", "-timeout", "5m"] if e2e else sys.argv[1:])
     validate_environment(os.environ)
     env = {key: os.environ[key] for key in ("PATH", "HOME", "TMPDIR", "USER", "LANG") if key in os.environ}
     env.update({"GOENV": "off", "GOWORK": "off", "GOFLAGS": "", "GOTOOLCHAIN": "local"})
-    # Preparation also starts owned process groups; cancellation must unwind
-    # run_command and terminate them before any database stack exists.
+    # Cancellation unwinds each active command and, once created, the owned DB.
     for sig in (signal.SIGINT, signal.SIGTERM):
         signal.signal(sig, interrupted)
     if not e2e and packages == ["./..."] and not any(f in flags for f in ("-run", "-skip")):
@@ -314,23 +373,9 @@ def main(e2e=False, selection=None):
             return 1
         print("PASS: integration shard " + shard if shard else "PASS: full integration suite across 4 isolated batches", flush=True)
         return 0
-    if e2e:
-        prepare = ROOT / ".local/e2e"
-        prepare.mkdir(parents=True, exist_ok=True)
-        preparations = [("ui-build", ["npm", "run", "build"], 180)]
-        # Acceptance uses prepared mode only after its required locked npm and
-        # browser/OS setup succeeds. Always rebuild UI assets for release embed.
-        if not prepared_web:
-            preparations.insert(0, ("npm-ci", ["npm", "ci"], 180))
-            preparations.append(("browser-install", ["node", "node_modules/@playwright/test/cli.js", "install", "--only-shell", "chromium"], 300))
-        for name, command, timeout in preparations:
-            print("Preparing E2E " + name, flush=True)
-            code, output = run_command(command, childenv=env, cwd=ROOT / "web", timeout=timeout, check=False)
-            log = prepare / (name + ".log")
-            log.write_text(output)
-            os.chmod(log, 0o600)
-            if code:
-                raise RuntimeError("E2E preparation failed; see " + str(log.relative_to(ROOT)))
+    if e2e and web_status is None:
+        # Standalone/prepared callers retain the original preparation order.
+        prepare_e2e_web(env, prepared_web)
     secret_values = []
     run = functools.partial(run_command, childenv=env)
 
@@ -397,6 +442,9 @@ def main(e2e=False, selection=None):
         timing("migrations", started)
         print("Prepared migrated test/acceptance/detection/enrichment/reporting/jobs/revision/draft-runtime databases and separate empty migration-test database", flush=True)
         if e2e:
+            if web_status is not None:
+                wait_for_web_preparation(web_status)
+                prepare_e2e_web(env, True)
             test_env["CHEESETRAP_E2E_RUN"] = "1"
         # One bounded PostgreSQL serves every domain. Do not multiply its
         # working sets by the host's CPU count through parallel Go packages.
