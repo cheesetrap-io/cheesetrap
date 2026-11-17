@@ -260,6 +260,7 @@ func collectProof(ctx context.Context, q *db.Queries, w db.CheesetrapReportWindo
 		return snapshot, err
 	}
 	gapForSensor := reportGapLookup(ctx, q, w)
+	copies := evidenceCopyWriter{ctx: ctx, q: q, reportID: uuid(report)}
 	err = q.VisitReportCandidateEvidence(ctx, db.ListReportCandidateEvidenceParams{WindowID: w.WindowID, SourceIp: netip.MustParseAddr(source)}, func(page []db.CheesetrapEvent) error {
 		copied := make([]domain.ReportEvidence, 0, len(page))
 		for _, row := range page {
@@ -284,12 +285,15 @@ func collectProof(ctx context.Context, q *db.Queries, w db.CheesetrapReportWindo
 				snapshot.DelayedCollection = true
 			}
 		}
-		if err := copyReportEvidence(ctx, q, uuid(report), copied); err != nil {
+		if err := copies.add(copied); err != nil {
 			return err
 		}
 		return writer.part("evidence", copied, len(copied))
 	})
 	if err != nil {
+		return snapshot, err
+	}
+	if err := copies.flush(); err != nil {
 		return snapshot, err
 	}
 	if writer.offsets["evidence"] == 0 {

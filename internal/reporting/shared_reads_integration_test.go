@@ -133,6 +133,7 @@ func TestSharedReportReadsVisitPhysicalMembersOnce(t *testing.T) {
 			}
 		})
 	}
+	verifyStreamedEvidenceCopies(t, ctx, tx, w)
 	// Assignment to another source is global and reduces every shared root's
 	// attached count without changing its original context count or hash.
 	exec(`WITH report AS (INSERT INTO cheesetrap.reports(window_id,source_ip) VALUES($1,'9.9.9.9') RETURNING report_id)
