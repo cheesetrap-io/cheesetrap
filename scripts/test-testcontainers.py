@@ -30,7 +30,7 @@ class LiveTestcontainersTests(unittest.TestCase):
 
     def test_overlapping_owned_databases_have_independent_data_and_cleanup(self):
         owners = [RUNNER.OwnedPostgres(self.env, self.endpoint, 'cheesetrap-test-' + secrets.token_hex(8),
-                                      secrets.token_hex(32)) for _ in range(2)]
+                                      secrets.token_hex(32)) for _ in range(3)]
         def sql(owner, database, query):
             _, output = RUNNER.run_command(self.docker + ['exec', '--env', 'PGPASSWORD', database,
                 'psql', '-X', '-At', '-v', 'ON_ERROR_STOP=1', '-h', '127.0.0.1', '-U', 'postgres',
@@ -41,16 +41,41 @@ class LiveTestcontainersTests(unittest.TestCase):
             if index not in closed:
                 closed.add(index)
                 owners[index].close()
+        databases, reapers = [], set()
         with contextlib.ExitStack() as cleanup:
-            for index in range(2): cleanup.callback(release, index)
-            first, _ = owners[0].start()
-            second, _ = owners[1].start()
-            self.assertNotEqual(first, second)
-            sql(owners[0], first, 'CREATE TABLE public.batch_probe (id integer)')
-            self.assertEqual(sql(owners[1], second, "SELECT to_regclass('public.batch_probe')"), '')
+            for index in range(3): cleanup.callback(release, index)
+            for owner in owners:
+                database, _ = owner.start()
+                databases.append(database)
+                _, info = RUNNER.run_command(self.docker + ['inspect', database], childenv=self.env)
+                db = json.loads(info)[0]
+                self.assertEqual(db['HostConfig']['Memory'], 1 << 30)
+                self.assertEqual(db['HostConfig']['NanoCpus'], 1_000_000_000)
+                self.assertEqual(db['HostConfig']['PidsLimit'], 128)
+                self.assertEqual(db['HostConfig']['Tmpfs'],
+                                 {'/var/lib/postgresql/data': 'rw,noexec,nosuid,size=1g'})
+                session = db['Config']['Labels']['org.testcontainers.sessionId']
+                self.assertEqual(session, owner.project)
+                _, ids = RUNNER.run_command(self.docker + ['ps', '-q', '--filter', 'label=org.testcontainers.ryuk=true',
+                                                           '--filter', 'label=org.testcontainers.sessionId=' + session], childenv=self.env)
+                self.assertEqual(len(ids.split()), 1)
+                self.assertNotIn(ids.strip(), reapers)
+                reapers.add(ids.strip())
+            self.assertEqual(len(set(databases)), 3)
+            sql(owners[0], databases[0], 'CREATE TABLE public.batch_probe (id integer)')
+            for index in (1, 2):
+                self.assertEqual(sql(owners[index], databases[index], "SELECT to_regclass('public.batch_probe')"), '')
             release(0)
-            self.assertEqual(sql(owners[1], second, 'SELECT 1'), '1',
-                             'releasing one lease must not clean up the other batch')
+            for index in (1, 2):
+                self.assertEqual(sql(owners[index], databases[index], 'SELECT 1'), '1',
+                                 'releasing one lease must not clean up another batch')
+            release(1)
+            self.assertEqual(sql(owners[2], databases[2], 'SELECT 1'), '1')
+        deadline = time.monotonic() + 30
+        for identifier in [*databases, *reapers]:
+            while RUNNER.run_command(self.docker + ['inspect', identifier], childenv=self.env, check=False)[0] == 0:
+                self.assertLess(time.monotonic(), deadline, 'owned container survived lease cleanup')
+                time.sleep(0.1)
 
     def test_sequential_owned_databases_use_distinct_reapers_and_clean_up(self):
         sessions, reapers, owned = set(), set(), []

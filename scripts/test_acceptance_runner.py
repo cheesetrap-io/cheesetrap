@@ -119,8 +119,8 @@ class AcceptanceGateTests(unittest.TestCase):
             self.assertEqual(row, {'command': 'integration', 'status': 'PASS', 'timings': rows[:2]})
             self.assertNotIn('private-runtime-canary', captured.getvalue())
             self.assertEqual(runner.public_integration_timings('INTEGRATION_TIMING not-json\n'), [])
-            repeated = '\n'.join('INTEGRATION_TIMING ' + json.dumps(rows[0]) for _ in range(20))
-            self.assertEqual(len(runner.public_integration_timings(repeated)), 15)
+            repeated = '\n'.join('INTEGRATION_TIMING ' + json.dumps(rows[0]) for _ in range(25))
+            self.assertEqual(len(runner.public_integration_timings(repeated)), 20)
 
     def test_generated_snapshot_detects_model_changes_additions_and_deletions(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -166,19 +166,19 @@ class AcceptanceGateTests(unittest.TestCase):
                                   'tests': [], 'locations': []})
             self.assertNotIn('private-runtime-canary', captured.getvalue())
 
-    def test_harness_merges_three_isolated_batches_and_single_e2e(self):
+    def test_harness_merges_four_isolated_batches_and_single_e2e(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             (root / '.local').mkdir()
             logs, expected = [], set()
-            for n in range(3):
+            for n in range(4):
                 identity = ('cheesetrap/example', f'TestBatch{n}')
                 expected.add(identity)
                 relative = f'.local/batch{n}.jsonl'
                 (root / relative).write_text(json.dumps(dict(Action='pass', Package=identity[0], Test=identity[1])))
                 logs.append(relative)
             output = '\n'.join('PASS: 1 tests; evidence ' + path for path in logs)
-            self.assertEqual(runner.harness_results(output, 0, 3, root), (expected, logs))
+            self.assertEqual(runner.harness_results(output, 0, 4, root), (expected, logs))
             self.assertEqual(runner.harness_results('evidence ' + logs[0], 0, 1, root),
                              ({('cheesetrap/example', 'TestBatch0')}, logs[:1]))
             for case in ('failed-exit', 'missing-batch', 'duplicate', 'missing-file', 'empty', 'fail', 'skip', 'escape'):
@@ -197,7 +197,7 @@ class AcceptanceGateTests(unittest.TestCase):
                         (root / 'outside.jsonl').write_text(original)
                         changed = output.replace(logs[-1], '.local/../outside.jsonl')
                     with self.assertRaises(ValueError):
-                        runner.harness_results(changed, code, 3, root)
+                        runner.harness_results(changed, code, 4, root)
                     path.write_text(original)
 
     def test_public_diagnostics_never_echo_runtime_values(self):

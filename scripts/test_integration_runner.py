@@ -12,7 +12,9 @@ import tempfile
 import unittest
 from unittest import mock
 import contextlib
+from collections import Counter
 import io
+import re
 import socket
 import threading
 
@@ -61,7 +63,7 @@ else:
  print('completed '+name, flush=True)
  if name == os.environ.get('PROBE_FAIL'): sys.exit(9)
 ''')
-        self.batches = [([f'./{name}'], ['-run', '^TestFixture$']) for name in ('one', 'two', 'three')]
+        self.batches = [([f'./{name}'], ['-run', '^TestFixture$']) for name in ('one', 'two', 'three', 'four')]
         self.env = {k: os.environ[k] for k in ('PATH', 'HOME') if k in os.environ}
 
     def exercise(self, failure=None):
@@ -73,9 +75,9 @@ else:
         def release():
             connections = []
             try:
-                # The first worker cannot finish until a second starts. A
-                # sequential implementation fails its assertion, not a stopwatch.
-                for _ in range(2):
+                # Three workers must start before any can finish. A smaller
+                # concurrency cap fails the verdict, not a timing comparison.
+                for _ in range(3):
                     connection, _ = server.accept()
                     connections.append(connection)
                     connection.recv(100)
@@ -99,7 +101,7 @@ else:
             thread.join(timeout=6)
         return code, captured.getvalue(), errors
 
-    def test_three_batches_overlap_at_most_two_and_keep_flags_and_output(self):
+    def test_four_batches_overlap_at_most_three_and_keep_flags_and_output(self):
         code, captured, errors = self.exercise()
         self.assertEqual(code, 0, 'independent batches must overlap and all succeed')
         self.assertEqual(errors, [])
@@ -112,23 +114,23 @@ else:
                 active.add(name)
                 peak = max(peak, len(active))
             else: active.remove(name)
-        self.assertEqual(peak, 2)
+        self.assertEqual(peak, 3)
         self.assertEqual(active, set())
-        self.assertEqual(set(started), {'./one', './two', './three'})
+        self.assertEqual(set(started), {'./one', './two', './three', './four'})
         self.assertEqual([line for line in captured.splitlines() if line.startswith('completed ')],
-                         ['completed ./one', 'completed ./two', 'completed ./three'])
+                         ['completed ./one', 'completed ./two', 'completed ./three', 'completed ./four'])
 
     def test_failed_batch_stays_red_and_other_batches_still_execute(self):
-        code, captured, errors = self.exercise('./one')
+        code, captured, errors = self.exercise('./four')
         self.assertNotEqual(code, 0)
         self.assertEqual(errors, [])
-        for name in ('one', 'two', 'three'): self.assertIn('completed ./'+name, captured)
+        for name in ('one', 'two', 'three', 'four'): self.assertIn('completed ./'+name, captured)
 
     def test_empty_batch_selection_fails(self):
         with self.assertRaisesRegex(ValueError, 'no integration batches'):
             RUNNER.run_batches([], self.env)
 
-    def test_parent_cancellation_waits_for_both_owned_batch_cleanups(self):
+    def test_parent_cancellation_waits_for_three_owned_batch_cleanups(self):
         probe = self.root / 'probe.py'
         probe.write_text('''import importlib.util, os, pathlib, signal, sys
 spec=importlib.util.spec_from_file_location('runner',sys.argv[1])
@@ -136,7 +138,7 @@ runner=importlib.util.module_from_spec(spec); spec.loader.exec_module(runner)
 runner.ROOT=pathlib.Path(sys.argv[2])
 for sig in (signal.SIGTERM,signal.SIGINT): signal.signal(sig,runner.interrupted)
 try:
- sys.exit(runner.run_batches([(['./'+name],[]) for name in ('one','two','three')],dict(os.environ)))
+ sys.exit(runner.run_batches([(['./'+name],[]) for name in ('one','two','three','four')],dict(os.environ)))
 except runner.IntegrationInterrupted:
  print('batch manager interrupted',flush=True)
  sys.exit(1)
@@ -151,20 +153,20 @@ except runner.IntegrationInterrupted:
             connections = []
             try:
                 names = set()
-                for _ in range(2):
+                for _ in range(3):
                     connection, _ = server.accept()
                     connections.append(connection)
                     names.add(connection.recv(100).decode())
-                self.assertEqual(names, {'./one', './two'})
+                self.assertEqual(names, {'./one', './two', './three'})
                 process.send_signal(signal.SIGTERM)
                 stdout, _ = process.communicate(timeout=5)
                 self.assertNotEqual(process.returncode, 0)
                 self.assertIn('batch manager interrupted', stdout)
-                for name in ('one', 'two'):
+                for name in ('one', 'two', 'three'):
                     self.assertTrue((self.root / ('clean-'+name)).exists(), 'owned batch cleanup must finish')
                     with self.assertRaises(ProcessLookupError):
                         os.kill(int((self.root / ('ready-'+name)).read_text()), 0)
-                self.assertFalse((self.root / 'ready-three').exists(), 'queued batches must not start on cancel')
+                self.assertFalse((self.root / 'ready-four').exists(), 'queued batches must not start on cancel')
             finally:
                 for connection in connections: connection.close()
                 for path in self.root.glob('ready-*'):
@@ -179,19 +181,51 @@ class ResultsTests(unittest.TestCase):
     integration = ("fixture/store", "TestCommitBatch")
 
     def test_full_suite_partitions_every_package_and_runs_heavy_case(self):
-        packages = ["./internal/api", "./internal/store", "./internal/reporting", "./tests/acceptance"]
+        packages = ["./internal/api", "./internal/store", "./internal/reporting", "./internal/jobs",
+                    "./internal/retention", "./tests/acceptance", "./future/package"]
         batches = RUNNER.full_suite_batches(packages, ["-race"])
+        self.assertEqual(len(batches), 4)
         self.assertEqual(set(p for group, _ in batches for p in group), set(packages))
-        self.assertEqual(batches[0][1], ["-race", "-skip", "^TestSecurityAggregateMemory$"])
-        self.assertEqual(batches[1], (["./internal/store"], ["-race"]))
-        self.assertEqual(batches[2], (["./internal/reporting"], ["-timeout", "5m", "-race", "-run", "^TestSecurityAggregateMemory$"]))
+        self.assertEqual(batches[0], (["./internal/reporting"], ["-timeout", "5m", "-race", "-run", "^TestSecurityAggregateMemory$"]))
+        self.assertEqual(batches[1], (["./internal/jobs", "./internal/retention"], ["-race"]))
+        self.assertEqual(batches[2], (["./internal/api", "./internal/reporting", "./tests/acceptance", "./future/package"],
+                                     ["-race", "-skip", "^TestSecurityAggregateMemory$"]))
+        self.assertEqual(batches[3], (["./internal/store"], ["-race"]))
+        for package in packages:
+            groups = [flags for group, flags in batches if package in group]
+            self.assertEqual(len(groups), 2 if package == './internal/reporting' else 1,
+                             'only reporting may appear twice, with complementary test filters')
 
     def test_memory_batch_preserves_explicit_timeout(self):
-        _, flags = RUNNER.full_suite_batches(["./internal/reporting", "./internal/store"],
-                                             ["-timeout", "2m"])[2]
+        _, flags = RUNNER.full_suite_batches(["./internal/reporting", "./internal/store", "./internal/jobs",
+                                             "./internal/retention"], ["-timeout", "2m"])[0]
         # Go honors the last timeout flag, including a deliberately shorter run.
         self.assertEqual(flags[flags.index("2m") - 1], "-timeout")
         self.assertEqual(flags[-4:], ["-timeout", "2m", "-run", "^TestSecurityAggregateMemory$"])
+
+    def test_full_partition_rejects_incomplete_package_inventory(self):
+        packages = ['./internal/jobs', './internal/retention', './internal/reporting', './internal/store']
+        for missing in packages:
+            with self.subTest(missing=missing), self.assertRaisesRegex(ValueError, 'inventory is incomplete'):
+                RUNNER.full_suite_batches([p for p in packages if p != missing], [])
+
+    def test_real_discovered_integration_tests_are_selected_exactly_once(self):
+        # Discover real source identities independently of the partition. This
+        # also covers future packages without adding a package allowlist here.
+        _, listed = RUNNER.run_command(['go', 'list', '-f', '{{.Dir}}', './...'], childenv=dict(os.environ))
+        packages = ['./' + str(Path(p).relative_to(RUNNER.ROOT)) for p in listed.splitlines()]
+        _, output = RUNNER.run_command(['go', 'run', './scripts/list-integration-tests.go', './...'],
+                                      childenv=dict(os.environ))
+        discovered = json.loads(output)
+        self.assertTrue(discovered, 'coverage proof requires actual integration tests')
+        selected = Counter()
+        for group, flags in RUNNER.full_suite_batches(packages, []):
+            for test in discovered:
+                if './' + test['Package'].removeprefix('cheesetrap/') not in group: continue
+                if '-run' in flags and not re.search(flags[flags.index('-run') + 1], test['Test']): continue
+                if '-skip' in flags and re.search(flags[flags.index('-skip') + 1], test['Test']): continue
+                selected[(test['Package'], test['Test'])] += 1
+        self.assertEqual(selected, Counter((test['Package'], test['Test']) for test in discovered))
 
     def test_bounded_memory_case_can_use_a_separate_owned_run(self):
         packages, flags = RUNNER.arguments(['./...', '-skip', '^TestSecurityAggregateMemory$'])

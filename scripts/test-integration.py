@@ -5,7 +5,7 @@ Supported arguments: relative Go packages, -run REGEXP, -skip REGEXP, -timeout D
 -v, -race. Go flags controlling execution/configuration cannot bypass the harness.
 A successful run must pass an integration-tagged test discovered from the selected
 packages. Package-only skip events mean no test files; real test skips fail.
-An unfiltered ./... run uses three fresh stacks, at most two at a time, with the
+An unfiltered ./... run uses four fresh stacks, at most three at a time, with the
 same per-stack resource caps.
 """
 import asyncio
@@ -133,29 +133,37 @@ def timing(phase, started):
 
 
 def full_suite_batches(packages, flags):
-    """Separate persistent fixtures and the hard-memory regression, not tests."""
+    """Balance measured package work without omitting new packages or tests."""
+    required = {'./internal/store', './internal/reporting', './internal/jobs', './internal/retention'}
+    if not required.issubset(packages):
+        raise ValueError('full integration package inventory is incomplete')
+    heavy = {'./internal/jobs', './internal/retention'}
     return [
-        ([p for p in packages if p != "./internal/store"], flags + ["-skip", "^TestSecurityAggregateMemory$"]),
-        (["./internal/store"], flags),
         # The memory regression owns a four-minute context, including its child
         # builds and bounded workers. Let it report that deadline and clean up
         # before Go's package alarm; caller-supplied timeouts still take priority.
         (["./internal/reporting"], ["-timeout", "5m"] + flags + ["-run", "^TestSecurityAggregateMemory$"]),
+        # Start the three longer lanes first. The short persistent store
+        # fixtures still get their own stack when the first lane finishes.
+        ([p for p in packages if p in heavy], flags),
+        ([p for p in packages if p not in heavy and p != "./internal/store"],
+         flags + ["-skip", "^TestSecurityAggregateMemory$"]),
+        (["./internal/store"], flags),
     ]
 
 
 def run_batches(batches, env):
-    """Overlap at most two fresh stacks; join every result and owned cleanup."""
+    """Overlap at most three fresh stacks; join every result and owned cleanup."""
     if not batches:
         raise ValueError('no integration batches selected')
 
     async def execute():
-        slots = asyncio.Semaphore(2)
+        slots = asyncio.Semaphore(3)
 
         async def batch(index, selection):
             async with slots:
                 packages, flags = selection
-                print(f"Full integration batch {index}/3 (fresh bounded PostgreSQL)", flush=True)
+                print(f"Full integration batch {index}/{len(batches)} (fresh bounded PostgreSQL)", flush=True)
                 # A private file avoids pipe backpressure and output interleaving.
                 with tempfile.TemporaryFile(mode='w+') as output:
                     child = subprocess.Popen(
@@ -281,7 +289,7 @@ def main(e2e=False, selection=None):
         all_packages = ["./" + str(Path(p).relative_to(ROOT)) for p in listed.splitlines()]
         if run_batches(full_suite_batches(all_packages, flags), env):
             return 1
-        print("PASS: full integration suite across 3 isolated batches", flush=True)
+        print("PASS: full integration suite across 4 isolated batches", flush=True)
         return 0
     if e2e:
         prepare = ROOT / ".local/e2e"

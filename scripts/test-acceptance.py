@@ -403,7 +403,7 @@ def public_integration_timings(output):
         if row['phase'] not in ('postgres', 'bootstrap', 'migrations', 'tests', 'cleanup'): continue
         if type(row['elapsed_ms']) is not int or not 0 <= row['elapsed_ms'] <= 1200000: continue
         timings.append(row)
-        if len(timings) == 15: break
+        if len(timings) == 20: break
     return timings
 
 
@@ -631,7 +631,7 @@ def main():
         raise
     try:
         output = (ROOT / integration['log']).read_text(errors='replace')
-        suites['integration'], logs = harness_results(output, integration['returncode'], 3)
+        suites['integration'], logs = harness_results(output, integration['returncode'], 4)
         integration['test_logs'] = logs
     except (ValueError, OSError):
         integration['status'] = 'FAIL'
