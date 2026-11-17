@@ -247,9 +247,9 @@ jobs:
     timeout-minutes: 45
     strategy:
       fail-fast: false
-      max-parallel: 6
+      max-parallel: 7
       matrix:
-        shard: [memory, jobs, retention, api, other, store]
+        shard: [memory, jobs, retention-recovery, retention, api, other, store]
     env:
       GOTOOLCHAIN: local
       GOENV: 'off'
@@ -285,6 +285,7 @@ jobs:
           key: integration-${{ matrix.shard }}-go-build-v1-${{ runner.os }}-${{ runner.arch }}-1.27.4-${{ hashFiles('go.mod', 'go.sum') }}-${{ github.sha }}
           restore-keys: |
             integration-${{ matrix.shard }}-go-build-v1-${{ runner.os }}-${{ runner.arch }}-1.27.4-${{ hashFiles('go.mod', 'go.sum') }}-
+            integration-jobs-go-build-v1-${{ runner.os }}-${{ runner.arch }}-1.27.4-${{ hashFiles('go.mod', 'go.sum') }}-
             integration-other-go-build-v1-${{ runner.os }}-${{ runner.arch }}-1.27.4-${{ hashFiles('go.mod', 'go.sum') }}-
             integration-go-build-v1-${{ runner.os }}-${{ runner.arch }}-1.27.4-${{ hashFiles('go.mod', 'go.sum') }}-
             acceptance-go-build-v1-${{ runner.os }}-${{ runner.arch }}-1.27.4-${{ hashFiles('go.mod', 'go.sum') }}-
@@ -319,7 +320,7 @@ jobs:
           if [ "$CI_EVENT" = pull_request ] && [ "$CI_SCOPE" = docs ]; then
             echo 'Documentation-only PR scope: full Go integration runs in the enforced merge queue.' >> "$GITHUB_STEP_SUMMARY"
           else
-            echo 'Every integration shard remains required, with independent cleanup and the existing per-stack resource limits. Complete CI requires all six shards, source, browser, Testcontainers and engines. Private evidence is never exchanged between runners.' >> "$GITHUB_STEP_SUMMARY"
+            echo 'Every integration shard remains required, including the separate retention recovery test with both original 20-second horizons. Complete CI requires all seven shards, source, browser, Testcontainers and engines. Each stack retains its existing limits and independent cleanup; private evidence is never exchanged between runners.' >> "$GITHUB_STEP_SUMMARY"
           fi
   testcontainers:
     runs-on: ubuntu-24.04

@@ -1,6 +1,8 @@
 """Synthetic GitHub metadata calibrates CI timing and failure reporting."""
 import copy
+import base64
 import datetime as dt
+import hashlib
 import importlib.util
 import json
 from pathlib import Path
@@ -13,6 +15,15 @@ M = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(M)
 REPO = 'example/project'
 SHA = '1' * 40
+LEGACY_SHARDS = ('memory', 'jobs', 'retention', 'api', 'other', 'store')
+RECOVERY_SHARDS = ('memory', 'jobs', 'retention-recovery', 'retention', 'api', 'other', 'store')
+
+
+def workflow_blob(shards=LEGACY_SHARDS, source=None):
+    source = source or ('jobs:\n  integration:\n    strategy:\n      matrix:\n        shard: [' + ', '.join(shards) + ']\n  automated:\n')
+    raw = source.encode()
+    sha = hashlib.sha1(b'blob ' + str(len(raw)).encode() + b'\0' + raw).hexdigest()
+    return dict(sha=sha, encoding='base64', content=base64.b64encode(raw).decode())
 
 
 def at(seconds):
@@ -153,7 +164,43 @@ class CITimingTests(unittest.TestCase):
                     dict(tree, tree=tree['tree'] + tree['tree'][:1])):
             with self.subTest(bad=bad), self.assertRaises(ValueError): M.configuration_id(bad)
 
-    def metadata_reader(self, *, earlier=False, rerun=False):
+    def test_workflow_inventory_is_bound_to_immutable_blob_and_supported_literal_matrix(self):
+        parse = getattr(M, 'workflow_shards', None)
+        self.assertTrue(callable(parse), 'native inventory must come from the exact run workflow blob')
+        for shards in (LEGACY_SHARDS, RECOVERY_SHARDS):
+            blob = workflow_blob(shards)
+            self.assertEqual(parse(blob, blob['sha']), shards)
+        good = workflow_blob()
+        malformed = [dict(good, sha='2' * 40), dict(good, encoding='utf-8'), dict(good, content='bad%'),
+                     dict(good, content=workflow_blob(RECOVERY_SHARDS)['content']),
+                     workflow_blob(('memory', 'jobs', 'other')),
+                     workflow_blob(LEGACY_SHARDS + ('jobs',)),
+                     workflow_blob(source='jobs:\n  integration:\n    strategy:\n      matrix: ${{ fromJSON(inputs.matrix) }}\n'),
+                     workflow_blob(source='jobs:\n  integration:\n        shard: [memory]\n        shard: [jobs]\n')]
+        for blob in malformed:
+            with self.subTest(blob=blob), self.assertRaises(ValueError): parse(blob, good['sha'] if blob in malformed[:4] else blob['sha'])
+
+    def test_new_workflow_cannot_pass_without_its_required_recovery_job(self):
+        pr, run, jobs, checks = fixture()
+        try:
+            M.measure(REPO, pr, run, jobs, checks, 'a' * 64, integration_shards=RECOVERY_SHARDS)
+        except ValueError:
+            pass
+        except TypeError:
+            self.fail('measure must validate the exact historical workflow shard inventory')
+        else:
+            self.fail('a seven-shard workflow cannot accept the old thirteen-job result')
+        extra = copy.deepcopy(jobs['jobs'][4])
+        extra.update(id=77, name='integration (retention-recovery)', started_at=at(6), completed_at=at(16))
+        jobs['jobs'].append(extra); jobs['total_count'] = 14
+        result = M.measure(REPO, pr, run, jobs, checks, 'a' * 64, integration_shards=RECOVERY_SHARDS)
+        self.assertEqual(result['runner_job_seconds'], 901)
+        with self.assertRaises(ValueError): self.measure((pr, run, jobs, checks))
+        extra['conclusion'] = 'skipped'
+        with self.assertRaises(ValueError):
+            M.measure(REPO, pr, run, jobs, checks, 'a' * 64, integration_shards=RECOVERY_SHARDS)
+
+    def metadata_reader(self, *, earlier=False, rerun=False, recovery=False, omit_recovery=False):
         pr, run, jobs, checks = fixture()
         run['head_commit'] = dict(tree_id='2' * 40)
         listing = copy.deepcopy(run)
@@ -168,10 +215,18 @@ class CITimingTests(unittest.TestCase):
         if earlier:
             history.append(dict(listing, id=41, created_at=at(2)))
         tree = dict(truncated=False, tree=[dict(path=p, type='blob', mode='100644', sha=SHA) for p in M.CONFIG_FILES])
+        blob = workflow_blob(RECOVERY_SHARDS if recovery else LEGACY_SHARDS)
+        next(e for e in tree['tree'] if e['path'] == '.github/workflows/ci.yml')['sha'] = blob['sha']
+        if recovery and not omit_recovery:
+            extra = copy.deepcopy(jobs['jobs'][4])
+            extra.update(id=77, name='integration (retention-recovery)', started_at=at(6), completed_at=at(16),
+                         check_run_url=f'https://api.github.com/repos/{REPO}/check-runs/177')
+            jobs['jobs'].append(extra); jobs['total_count'] = 14
         routes = {f'repos/{REPO}/pulls/7': pr,
                   f'repos/{REPO}/actions/runs/42/attempts/1': run,
                   f'repos/{REPO}/actions/runs/42/attempts/1/jobs?per_page=100': jobs,
                   f'repos/{REPO}/git/trees/{"2"*40}?recursive=1': tree,
+                  f'repos/{REPO}/git/blobs/{blob["sha"]}': blob,
                   f'repos/{REPO}/commits/{SHA}/pulls?per_page=100': [pr],
                   **{f'repos/{REPO}/check-runs/{c["id"]}': c for c in checks}}
         calls = []
@@ -182,6 +237,14 @@ class CITimingTests(unittest.TestCase):
             self.assertIn(path, routes)
             return copy.deepcopy(routes[path])
         return read, calls
+
+    def test_collection_rejects_a_missing_new_shard_even_when_old_contexts_are_green(self):
+        read, calls = self.metadata_reader(recovery=True)
+        result = M.collect(REPO, 7, 42, read=read)
+        self.assertEqual(len(result['jobs']), 14)
+        self.assertTrue(any('/git/blobs/' in path for path in calls))
+        read, _ = self.metadata_reader(recovery=True, omit_recovery=True)
+        with self.assertRaisesRegex(ValueError, 'job inventory'): M.collect(REPO, 7, 42, read=read)
 
     def test_collection_uses_attempt_one_and_keeps_its_failure_after_a_rerun(self):
         read, calls = self.metadata_reader(rerun=True)

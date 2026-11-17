@@ -49,7 +49,7 @@ A fresh private status releases UI build and every E2E/browser test only after
 web preparation succeeds. Both command results remain required; a failed setup
 cannot cause a second installation attempt. Failure or cancellation waits for
 owned cleanup. Standalone E2E and `--prepared-web` retain their preparation order. Integration
-runs every existing test across six required CI shards on separate runners. Each
+runs every existing test across seven required CI shards on separate runners. Each
 component verifies all its concrete T01–T13 tests and labels requirements owned by
 another component. A component result cannot pass the complete acceptance gate.
 
@@ -101,14 +101,17 @@ together; store starts when a slot is free. Packages within each stack still run
 serially. New packages enter the remaining-packages batch. It waits for every
 selected batch and propagates any failure. Cancellation stops active batches and
 waits for their owned cleanup.
-CI splits those same tests into memory, jobs, retention, API, other packages and store
+CI splits those same tests into memory, jobs, retention recovery, retention, API, other packages and store
 shards, each with its own runner and one fresh stack. Every discovered test is
 assigned once; new packages enter the other-packages shard. The required matrix
 uses `fail-fast: false` and never ignores a failed shard. Integration-matrix
-database caps total six GiB of memory/tmpfs and six CPUs across six runners,
+database caps total seven GiB of memory/tmpfs and seven CPUs across seven runners,
 before the unchanged bounded memory-test child. The browser E2E and live
 Testcontainers jobs retain their own existing limits. Local full runs still use
 at most three stacks as described above.
+The recovery shard runs the original `TestRetentionRiverDeferralRecovery`,
+including both full 20-second horizons; jobs owns all its other tests. Every shard
+must pass, and the recovery result must explicitly include that named regression.
 For local full runs, peak database limits are three GiB of memory/tmpfs and three
 CPUs across three stacks, before Go test processes and the bounded memory-test child.
 The memory regression batch keeps five minutes so its four-minute context can
