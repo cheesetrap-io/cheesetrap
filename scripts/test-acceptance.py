@@ -76,7 +76,7 @@ def run_command(command, *, cwd, env, log, timeout, cleanup_timeout=90):
 
 
 def run_independent(groups, *, env, cleanup_timeout=90):
-    """Join integration and CPU-bounded preparation, retaining every owned result."""
+    """Join independent checks and bounded preparation, retaining every owned result."""
     if len(groups) != 2 or any(not group for group in groups):
         raise ValueError('exactly two nonempty independent command groups required')
 
@@ -116,8 +116,8 @@ def run_independent(groups, *, env, cleanup_timeout=90):
                     await stop(active)
 
     async def execute():
-        # Only the second lane prepares a compiler. Unit tests and the
-        # integration runner retain their original execution settings.
+        # Bound Go-based preparation tools in the second lane. Source tests
+        # and the integration runner retain their original execution settings.
         tasks = [asyncio.create_task(lane(groups[0], env)),
                  asyncio.create_task(lane(groups[1], dict(env, GOMAXPROCS='1')))]
         try:
@@ -485,7 +485,7 @@ def print_public_summary(commands):
     sources = {name: (ROOT / name).read_text() for name in tracked
                if name.endswith(('.go', '.py', '.ts', '.tsx')) and (ROOT / name).is_file()
                and not (ROOT / name).is_symlink()}
-    allowed = {'runner-tests', 'go', 'vet', 'sql-prepare', 'integration', 'e2e', 'ui', 'ui-build',
+    allowed = {'runner-tests', 'web-prepare', 'go', 'vet', 'sql-prepare', 'integration', 'e2e', 'ui', 'ui-build',
                'api-schema', 'api-types', 'api-contract', 'sql-schema', 'generated-clean'}
     for command in commands:
         name = command['name']
@@ -605,7 +605,10 @@ def main():
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument('--linux-evidence', type=Path)
     mode.add_argument('--automated-only', action='store_true', help='CI checks only; never asserts full Linux acceptance')
+    parser.add_argument('--prepare-web', action='store_true', help='prepare locked web dependencies and Chromium alongside Python regressions (CI only)')
     args = parser.parse_args()
+    if args.prepare_web and not args.automated_only:
+        parser.error('--prepare-web requires --automated-only')
     install_signal_handlers()
     os.umask(0o077)
     # Match the owned DB harness policy and reject production/test targets.
@@ -635,7 +638,7 @@ def main():
         return record
 
     def abort(error):
-        (out / 'results.json').write_text(json.dumps({'schema': 1, 'revision': revision, 'checkout_clean': checkout_clean, 'tracked_diff_sha256': hashlib.sha256(diff).hexdigest(), 'started_at': stamp, 'status': 'FAIL', 'aborted': True, 'reason': str(error), 'commands': commands}, indent=2) + '\n')
+        (out / 'results.json').write_text(json.dumps({'schema': 1, 'revision': revision, 'checkout_clean': checkout_clean, 'tracked_diff_sha256': hashlib.sha256(diff).hexdigest(), 'started_at': stamp, 'status': 'FAIL', 'aborted': True, 'prepare_web': args.prepare_web, 'reason': str(error), 'commands': commands}, indent=2) + '\n')
         print_public_summary(commands)
 
     def run(name, command, cwd=ROOT, timeout=1200, report=None):
@@ -656,7 +659,20 @@ def main():
         return code, log.read_text(errors='replace') if name != 'ui' and log.exists() else ''
     # Keep source tests ahead of DB work: overlapping their Go subprocesses
     # prolonged integration on the measured runner. Their flags stay unchanged.
-    run('runner-tests', ['python3', '-B', 'scripts/test-python.py', 'regression'])
+    if args.prepare_web:
+        runner_tests = record_for('runner-tests', ['python3', '-B', 'scripts/test-python.py', 'regression'])
+        web_prepare = record_for('web-prepare', ['./scripts/prepare-ci-web.sh'])
+        try:
+            run_independent([[runner_tests], [web_prepare]], env=env)
+            if web_prepare['status'] != 'PASS':
+                # E2E also installs dependencies. Never retry a failed setup by
+                # continuing to that independently usable local harness.
+                raise ValueError('web preparation failed; acceptance stopped before E2E')
+        except (AcceptanceInterrupted, AcceptanceTimeout, ValueError) as error:
+            abort(error)
+            raise
+    else:
+        run('runner-tests', ['python3', '-B', 'scripts/test-python.py', 'regression'])
     code, output = run('go', ['go', 'test', './...', '-count=1', '-json'])
     suites['go'], errors = go_results(output)
     if errors: commands[-1]['status'] = 'FAIL'
@@ -716,7 +732,7 @@ def main():
     report = {'schema': 1, 'revision': revision, 'source_sha256': source_hashes, 'tracked_diff_sha256': hashlib.sha256(diff).hexdigest(), 'checkout_clean': checkout_clean, 'started_at': stamp, 'status': status,
               'environment': {'os': platform.system(), 'release': platform.release(), 'machine': platform.machine(), 'python': platform.python_version()},
               'commands': commands, 'tests': {suite: [dict(package=p, name=n) for p, n in sorted(tests)] for suite, tests in suites.items()},
-              'requirements': rows, 'linux_error': linux_error}
+              'requirements': rows, 'linux_error': linux_error, 'prepare_web': args.prepare_web}
     (out / 'results.json').write_text(json.dumps(report, indent=2) + '\n')
     print_public_summary(commands)
     print(f'{status}: {out.relative_to(ROOT)}/results.json')

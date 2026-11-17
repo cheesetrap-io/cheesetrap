@@ -37,9 +37,13 @@ and dependency checks still run. Any code, configuration, lockfile, unusual path
 unknown comparison selects all checks. The enforced merge queue always runs the
 complete suite before merging, including for documentation-only PRs.
 
-Automated acceptance runs Python regressions, Go unit tests and vet before DB
-work, then overlaps integration with compilation of the pinned SQL generator.
-Only compiler preparation uses one Go CPU and one build process. Unit tests keep
+CI invokes automated acceptance with `--automated-only --prepare-web`, overlapping
+locked npm and Chromium preparation with Python regressions. Both finish before
+Go unit tests, vet and DB work. Failed web preparation stops acceptance before
+E2E can attempt another install; Python failures remain required results.
+Without `--prepare-web`, local acceptance uses already prepared web dependencies.
+Acceptance then overlaps integration with compilation of the pinned SQL generator.
+SQL compiler preparation uses one Go CPU and one build process. Unit tests keep
 their execution settings; integration owns at most three bounded database stacks.
 E2E, UI builds and source generators start only after
 both lanes finish; every command result remains required and cancellation waits

@@ -168,8 +168,11 @@ def validate_acceptance(result, revision, sources):
     require(result.get('tracked_diff_sha256') == hashlib.sha256(b'').hexdigest(), 'acceptance began with a nonempty or unknown tracked diff')
     require(result.get('checkout_clean') is True, 'acceptance did not begin from a clean checkout')
     require(bool(sources) and result.get('source_sha256') == sources, 'acceptance production sources are stale')
+    prepare_web = result.get('prepare_web', False)
+    require(type(prepare_web) is bool, 'acceptance web preparation mode must be boolean')
+    expected_commands = set(ACCEPTANCE_COMMANDS) | ({'web-prepare'} if prepare_web else set())
     commands = result.get('commands', [])
-    require(len(commands) == len(ACCEPTANCE_COMMANDS) and {c.get('name') for c in commands} == set(ACCEPTANCE_COMMANDS)
+    require(len(commands) == len(expected_commands) and {c.get('name') for c in commands} == expected_commands
             and all(c.get('status') == 'PASS' for c in commands), 'acceptance commands incomplete or failed')
     rows = result.get('requirements', [])
     require(len(rows) == 13 and {r.get('id') for r in rows} == {f'T{i:02}' for i in range(1, 14)}
