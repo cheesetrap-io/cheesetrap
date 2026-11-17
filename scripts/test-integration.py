@@ -319,7 +319,7 @@ def main(e2e=False, selection=None):
         for name, command, timeout in (
             ("npm-ci", ["npm", "ci"], 180),
             ("ui-build", ["npm", "run", "build"], 180),
-            ("browser-install", ["node", "node_modules/@playwright/test/cli.js", "install", "chromium"], 300),
+            ("browser-install", ["node", "node_modules/@playwright/test/cli.js", "install", "--only-shell", "chromium"], 300),
         ):
             print("Preparing E2E " + name, flush=True)
             code, output = run_command(command, childenv=env, cwd=ROOT / "web", timeout=timeout, check=False)

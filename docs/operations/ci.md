@@ -25,11 +25,14 @@ The jobs exchange status results, never private evidence artifacts.
 The source component prepares locked npm dependencies alongside Python regressions,
 joining both before Go tests. It uses `prepare-ci-web.sh --dependencies-only`
 because source tests do not need Chromium. The browser component prepares locked
-npm dependencies, Chromium and system libraries before the existing isolated Go
-E2E/browser harness. Setup is a required command in each private result. A failed
+npm dependencies, Chromium's headless shell and system libraries before the
+existing isolated Go E2E/browser harness. Setup is a required command in each private result. A failed
 setup stops before another install. Cancellation stops owned process groups and
 waits for cleanup. Local complete acceptance prepares web dependencies and Chromium
-alongside Python only with `--automated-only --prepare-web`.
+alongside Python only with `--automated-only --prepare-web`. Both Playwright
+configurations use headless Chromium without a browser channel or executable
+override, so `--only-shell` avoids downloading unused headed Chromium; every
+existing browser test and OS dependency check still runs.
 
 The Go integration component is a matrix with six runners: memory, jobs, retention,
 API, other packages, and store. Every shard owns one fresh bounded PostgreSQL stack;
