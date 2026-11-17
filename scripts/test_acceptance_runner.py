@@ -33,12 +33,17 @@ class AcceptanceGateTests(unittest.TestCase):
 
             def independent(groups, **kwargs):
                 events.append([[row['name'] for row in group] for group in groups])
-                if component == 'source':
+                if component == 'source' and groups[0][0]['name'] == 'runner-tests':
                     self.assertEqual(groups[1][0]['command'], ['./scripts/prepare-ci-web.sh', '--dependencies-only'])
                 for group in groups:
                     for row in group:
                         row.update(status='FAIL' if row['name'] == failed else 'PASS',
                                    returncode=9 if row['name'] == failed else 0, process_status='exited')
+                        if row['name'] == 'ui' and failed != 'missing-ui-report':
+                            report = root / row['report']
+                            report.write_text('{' if failed == 'invalid-ui-report' else json.dumps({
+                                'success': True, 'testResults': [{'name': 'src/fixture.test.ts', 'status': 'passed',
+                                'assertionResults': [{'title': 'fixture', 'fullName': 'fixture', 'status': 'passed'}]}]}))
 
             def command(argv, **kwargs):
                 events.append(argv)
@@ -75,9 +80,23 @@ class AcceptanceGateTests(unittest.TestCase):
         events, result = self.exercise_initial_preparation(component='source', stop_at='npm')
         self.assertEqual(events[:-1], [[['runner-tests'], ['web-prepare']],
             ['go', 'test', './...', '-count=1', '-json'], ['go', 'vet', './...'],
-            ['go', 'run', '-p=1', 'github.com/sqlc-dev/sqlc/cmd/sqlc@v1.31.1', 'version']])
-        self.assertEqual(events[-1][:3], ['npm', 'run', 'test'])
+            [['ui'], ['sql-prepare']]])
+        self.assertEqual(events[-1], ['npm', 'run', 'build'])
         self.assertEqual(result['component'], 'source')
+
+    def test_source_sql_and_ui_keep_independent_failures_and_required_reports(self):
+        for failed in ('', 'sql-prepare', 'ui', 'missing-ui-report', 'invalid-ui-report'):
+            with self.subTest(failed=failed):
+                events, result = self.exercise_initial_preparation(component='source', failed=failed, stop_at='npm')
+                self.assertIn([['ui'], ['sql-prepare']], events)
+                rows = {r['name']: r for r in result['commands'][:-1]}
+                self.assertEqual(rows['sql-prepare']['command'],
+                    ['go', 'run', '-p=1', 'github.com/sqlc-dev/sqlc/cmd/sqlc@v1.31.1', 'version'])
+                self.assertEqual(rows['ui']['command'][:6],
+                    ['npm', 'run', 'test', '--', '--run', '--includeTaskLocation'])
+                self.assertEqual(rows['sql-prepare']['status'], 'FAIL' if failed == 'sql-prepare' else 'PASS')
+                self.assertEqual(rows['ui']['status'], 'FAIL' if failed in ('ui', 'missing-ui-report', 'invalid-ui-report') else 'PASS')
+                self.assertEqual(runner.run_status([], list(rows.values()), True), 'FAIL' if failed else 'PASS_AUTOMATED')
 
     def test_browser_component_prepares_once_then_runs_existing_e2e_harness(self):
         events, result = self.exercise_initial_preparation(component='browser', stop_at='./scripts/test-e2e.sh')
