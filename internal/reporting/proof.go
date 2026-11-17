@@ -43,18 +43,20 @@ func visitContents[T any](s storedContents, kind string, f func(T) error) error 
 				Payload []byte
 			}
 			// Exploit explanations can contain every distinct retained URI and
-			// span several MiB each. Bound bytes before fetching payloads, not
+			// span several MiB each. Bound bytes before returning payloads, not
 			// only row count. A single oversized part is still read completely.
+			// Carry payloads through the bounded candidate set, avoiding a second
+			// table lookup that can repeatedly scan an entire proof prefix when
+			// freshly written parts lack refreshed planner statistics.
 			rows, err := s.q.Queryer().Query(s.ctx, `WITH candidates AS MATERIALIZED (
-SELECT ordinal,octet_length(payload) AS bytes FROM cheesetrap.report_proof_parts
+SELECT ordinal,payload,octet_length(payload) AS bytes FROM cheesetrap.report_proof_parts
 WHERE report_id=$1 AND kind=$2 AND ordinal>$3 ORDER BY ordinal LIMIT 32
 ), budgeted AS (
-SELECT ordinal,sum(bytes) OVER (ORDER BY ordinal) AS total_bytes FROM candidates
+SELECT ordinal,payload,sum(bytes) OVER (ORDER BY ordinal) AS total_bytes FROM candidates
 )
-SELECT p.ordinal,p.payload FROM budgeted b JOIN cheesetrap.report_proof_parts p
-ON p.report_id=$1 AND p.kind=$2 AND p.ordinal=b.ordinal
-WHERE b.total_bytes<=1048576 OR b.ordinal=(SELECT min(ordinal) FROM candidates)
-ORDER BY p.ordinal`, s.report, kind, after)
+SELECT ordinal,payload FROM budgeted
+WHERE total_bytes<=1048576 OR ordinal=(SELECT min(ordinal) FROM candidates)
+ORDER BY ordinal`, s.report, kind, after)
 			if err != nil {
 				return err
 			}
