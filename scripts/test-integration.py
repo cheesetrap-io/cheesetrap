@@ -7,6 +7,7 @@ A successful run must pass an integration-tagged test discovered from the select
 packages. Package-only skip events mean no test files; real test skips fail.
 An unfiltered ./... run uses four fresh stacks, at most three at a time, with the
 same per-stack resource caps.
+--ci-shard NAME selects one fixed CI shard and forbids other targets or flags.
 """
 import asyncio
 import functools
@@ -22,6 +23,7 @@ import tempfile
 import time
 
 ROOT = Path(__file__).resolve().parents[1]
+CI_SHARDS = ('memory', 'jobs', 'retention', 'other', 'store')
 
 
 class IntegrationInterrupted(Exception):
@@ -152,6 +154,21 @@ def full_suite_batches(packages, flags):
     ]
 
 
+def ci_shards(packages, flags):
+    """Distribute the same tests across runners, including future packages."""
+    batches = full_suite_batches(packages, flags)
+    return dict(memory=batches[0], jobs=(["./internal/jobs"], flags),
+                retention=(["./internal/retention"], flags), other=batches[2], store=batches[3])
+
+
+def ci_shard_argument(argv):
+    if not argv or argv[0] != '--ci-shard':
+        return None
+    if len(argv) != 2 or argv[1] not in CI_SHARDS:
+        raise ValueError('CI shard must be one fixed name with no target or flag overrides')
+    return argv[1]
+
+
 def run_batches(batches, env):
     """Overlap at most three fresh stacks; join every result and owned cleanup."""
     if not batches:
@@ -276,7 +293,8 @@ def main(e2e=False, selection=None):
     os.umask(0o077)
     if e2e and sys.argv[1:]:
         raise ValueError("E2E runner accepts no targets or arguments")
-    packages, flags = selection or arguments(["./tests/acceptance", "./internal/api", "-run", "^(TestReviewFlow|TestHTTPSProxyAuth)$", "-timeout", "5m"] if e2e else sys.argv[1:])
+    shard = ci_shard_argument(sys.argv[1:]) if not e2e else None
+    packages, flags = (["./..."], []) if shard else selection or arguments(["./tests/acceptance", "./internal/api", "-run", "^(TestReviewFlow|TestHTTPSProxyAuth)$", "-timeout", "5m"] if e2e else sys.argv[1:])
     validate_environment(os.environ)
     env = {key: os.environ[key] for key in ("PATH", "HOME", "TMPDIR", "USER", "LANG") if key in os.environ}
     env.update({"GOENV": "off", "GOWORK": "off", "GOFLAGS": "", "GOTOOLCHAIN": "local"})
@@ -287,9 +305,10 @@ def main(e2e=False, selection=None):
     if not e2e and packages == ["./..."] and not any(f in flags for f in ("-run", "-skip")):
         _, listed = run_command(["go", "list", "-f", "{{.Dir}}", "./..."], childenv=env)
         all_packages = ["./" + str(Path(p).relative_to(ROOT)) for p in listed.splitlines()]
-        if run_batches(full_suite_batches(all_packages, flags), env):
+        batches = [ci_shards(all_packages, flags)[shard]] if shard else full_suite_batches(all_packages, flags)
+        if run_batches(batches, env):
             return 1
-        print("PASS: full integration suite across 4 isolated batches", flush=True)
+        print("PASS: integration shard " + shard if shard else "PASS: full integration suite across 4 isolated batches", flush=True)
         return 0
     if e2e:
         prepare = ROOT / ".local/e2e"

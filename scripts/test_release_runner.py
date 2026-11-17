@@ -172,6 +172,10 @@ class ReleaseGateTests(unittest.TestCase):
         result['component'] = 'source'
         with self.assertRaisesRegex(ValueError, 'component'):
             self.checker.validate_acceptance(result, "a" * 40, {"go.mod": "b" * 64})
+        result = self.evidence()
+        result['integration_shard'] = 'memory'
+        with self.assertRaisesRegex(ValueError, 'shard'):
+            self.checker.validate_acceptance(result, "a" * 40, {"go.mod": "b" * 64})
 
     def test_component_gate_requires_every_owned_command_and_requirement(self):
         self.assertTrue(callable(getattr(self.checker, 'validate_component', None)),
@@ -198,6 +202,7 @@ class ReleaseGateTests(unittest.TestCase):
             def validate(row, name=component):
                 self.checker.validate_component(row, 'a' * 40, {'go.mod': 'b' * 64}, name, manifest)
             validate(result)
+            with self.assertRaises(ValueError): validate(dict(result, integration_shard='memory'))
             with self.assertRaises(ValueError):
                 self.checker.validate_acceptance(result, 'a' * 40, {'go.mod': 'b' * 64})
             for field, value in [('status', 'PASS_AUTOMATED'), ('component', 'other'),
@@ -221,6 +226,31 @@ class ReleaseGateTests(unittest.TestCase):
             if component == 'source': validate(result)
             else:
                 with self.assertRaises(ValueError): validate(result)
+
+    def test_shard_gate_is_explicit_and_memory_requires_its_named_regression(self):
+        spec = importlib.util.spec_from_file_location('shard_acceptance', ROOT / 'scripts/test-acceptance.py')
+        runner = importlib.util.module_from_spec(spec); spec.loader.exec_module(runner)
+        manifest = json.loads((ROOT / 'tests/acceptance/coverage.json').read_text())
+        identities = {(t['package'], t['name']) for r in manifest['requirements'] for t in r['tests']
+                      if t['suite'] == 'integration'}
+        identities.add(('cheesetrap/internal/reporting', 'TestSecurityAggregateMemory'))
+        for shard in ('memory', 'jobs', 'retention', 'other', 'store'):
+            result = self.evidence()
+            result.update(status='PASS_COMPONENT', component='integration', integration_shard=shard,
+                commands=[dict(name='integration', status='PASS')],
+                tests={'integration': [dict(package=p, name=n) for p, n in sorted(identities)]},
+                requirements=runner.evaluate_component(manifest, {'integration': identities}, 'integration', shard))
+            with self.subTest(shard=shard):
+                self.checker.validate_component(result, 'a' * 40, {'go.mod': 'b' * 64}, 'integration', manifest, shard)
+                with self.assertRaises(ValueError):
+                    self.checker.validate_component(result, 'a' * 40, {'go.mod': 'b' * 64}, 'integration', manifest)
+                with self.assertRaises(ValueError):
+                    self.checker.validate_component(result, 'a' * 40, {'go.mod': 'b' * 64}, 'integration', manifest,
+                                                    'store' if shard != 'store' else 'other')
+                if shard == 'memory':
+                    result['tests']['integration'] = []
+                    with self.assertRaisesRegex(ValueError, 'memory'):
+                        self.checker.validate_component(result, 'a' * 40, {'go.mod': 'b' * 64}, 'integration', manifest, shard)
 
     def test_ci_web_preparation_is_an_additional_required_success(self):
         result = self.evidence()

@@ -282,7 +282,12 @@ class QemuWorkflowTests(unittest.TestCase):
             prefixes = [re.search(r'^          restore-keys: (.+)$', restore, re.M).group(1)]
         prefix = key.removesuffix('${{ github.sha }}')
         self.assertEqual(prefixes[0], prefix)
-        self.assertTrue(set(prefixes) <= {prefix, prefix.replace('integration-go-build', 'acceptance-go-build')})
+        if job == 'integration':
+            self.assertIn('${{ matrix.shard }}', key, 'matrix writers must never race for one immutable key')
+            legacy = prefix.replace('integration-${{ matrix.shard }}-go-build', 'integration-go-build')
+            self.assertTrue(set(prefixes) <= {prefix, legacy, legacy.replace('integration-go-build', 'acceptance-go-build')})
+        else:
+            self.assertEqual(prefixes, [prefix])
         self.assertIn('key: ${{ steps.go-build-restore.outputs.cache-primary-key }}', save)
 
         # Evaluate the workflow's actual predicate across events, failures and
@@ -314,6 +319,18 @@ class QemuWorkflowTests(unittest.TestCase):
 
     def test_integration_build_cache_is_seeded_only_after_successful_master_checks(self):
         self.check_master_build_cache('integration', 'integration')
+
+    def test_integration_matrix_requires_every_shard_without_fail_fast_or_ignored_failures(self):
+        job = self.ci_job('integration')
+        self.assertIn('fail-fast: false', job)
+        self.assertNotIn('continue-on-error', job)
+        self.assertNotIn('exclude:', job)
+        match = re.search(r'^        shard: \[([^\]]+)\]$', job, re.M)
+        self.assertIsNotNone(match, 'CI must enumerate every required integration shard')
+        self.assertEqual(match.group(1).split(', '), ['memory', 'jobs', 'retention', 'other', 'store'])
+        self.assertIn('CI_SHARD: ${{ matrix.shard }}', job)
+        self.assertIn('--component integration --integration-shard "$CI_SHARD"', job)
+        self.assertIn('--component-results integration "$result" --integration-shard "$CI_SHARD"', job)
 
     def test_required_verdict_runs_after_every_independent_job_even_on_failure(self):
         verdict = self.ci_job('automated')

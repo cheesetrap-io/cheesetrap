@@ -42,7 +42,7 @@ and the complete Go integration component (`--automated-only --component integra
 on separate runners. Source checks overlap npm/Chromium preparation with Python
 regressions, then run Go unit/vet, E2E, UI, SQL/OpenAPI generation and drift checks.
 Failed web preparation stops before another E2E install. Integration runs every
-existing batch and test, with at most three bounded database stacks. Each
+existing test across five required CI shards on separate runners. Each
 component verifies all its concrete T01–T13 tests and labels requirements owned by
 the other component. A component result cannot pass the complete acceptance gate.
 
@@ -94,6 +94,14 @@ together; store starts when a slot is free. Packages within each stack still run
 serially. New packages enter the remaining-packages batch. It waits for every
 selected batch and propagates any failure. Cancellation stops active batches and
 waits for their owned cleanup.
+CI splits those same tests into memory, jobs, retention, other packages and store
+shards, each with its own runner and one fresh stack. Every discovered test is
+assigned once; new packages enter the other-packages shard. The required matrix
+uses `fail-fast: false` and never ignores a failed shard. Integration-matrix
+database caps total five GiB of memory/tmpfs and five CPUs across five runners,
+before the unchanged bounded memory-test child. The source E2E and live
+Testcontainers jobs retain their own existing limits. Local full runs still use
+at most three stacks as described above.
 Peak database limits are therefore three GiB of memory/tmpfs and three CPUs across
 three stacks, before Go test processes and the bounded memory-test child.
 The memory regression batch keeps five minutes so its four-minute context can

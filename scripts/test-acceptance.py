@@ -21,6 +21,7 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 LINUX_CHECKS = {'linux-install', 'linux-public-boundary', 'linux-sensor-egress', 'linux-ipv6'}
+INTEGRATION_SHARDS = ('memory', 'jobs', 'retention', 'other', 'store')
 
 
 class AcceptanceInterrupted(Exception):
@@ -588,15 +589,25 @@ def run_status(rows, commands, automated=False):
     return 'BLOCKED' if any(r['status'] == 'BLOCKED' for r in rows) else 'PASS'
 
 
-def evaluate_component(manifest, suites, component):
+def integration_shard_for(test):
+    if test['package'] == 'cheesetrap/internal/reporting' and test['name'] == 'TestSecurityAggregateMemory':
+        return 'memory'
+    return {'cheesetrap/internal/jobs': 'jobs', 'cheesetrap/internal/retention': 'retention',
+            'cheesetrap/internal/store': 'store'}.get(test['package'], 'other')
+
+
+def evaluate_component(manifest, suites, component, shard=None):
     """Complementary CI gates; neither result represents complete acceptance."""
     validate_manifest(manifest)
     if component not in ('source', 'integration'):
         raise ValueError('unknown acceptance component')
+    if shard is not None and (component != 'integration' or shard not in INTEGRATION_SHARDS):
+        raise ValueError('unknown or misplaced integration shard')
     owned = {'integration'} if component == 'integration' else {'go', 'e2e'}
     filtered, outside = [], set()
     for original in manifest['requirements']:
-        row = dict(original, tests=[test for test in original['tests'] if test['suite'] in owned])
+        row = dict(original, tests=[test for test in original['tests'] if test['suite'] in owned
+                                   and (shard is None or integration_shard_for(test) == shard)])
         if component == 'integration':
             row.update(browser_tests=[], ui_tests=[])
         if not row['tests'] and not row.get('browser_tests') and not row.get('ui_tests'):
@@ -628,6 +639,7 @@ def main():
     mode.add_argument('--automated-only', action='store_true', help='CI checks only; never asserts full Linux acceptance')
     parser.add_argument('--prepare-web', action='store_true', help='prepare locked web dependencies and Chromium alongside Python regressions (CI only)')
     parser.add_argument('--component', choices=('source', 'integration'), help='one complementary CI component; never complete acceptance')
+    parser.add_argument('--integration-shard', choices=INTEGRATION_SHARDS, help='one fixed integration shard; complete CI requires every shard')
     args = parser.parse_args()
     if args.prepare_web and not args.automated_only:
         parser.error('--prepare-web requires --automated-only')
@@ -635,6 +647,8 @@ def main():
         parser.error('--component requires --automated-only')
     if args.component == 'integration' and args.prepare_web:
         parser.error('integration component cannot prepare web dependencies')
+    if args.integration_shard and args.component != 'integration':
+        parser.error('--integration-shard requires the integration component')
     install_signal_handlers()
     os.umask(0o077)
     # Match the owned DB harness policy and reject production/test targets.
@@ -664,7 +678,7 @@ def main():
         return record
 
     def abort(error):
-        (out / 'results.json').write_text(json.dumps({'schema': 1, 'revision': revision, 'checkout_clean': checkout_clean, 'tracked_diff_sha256': hashlib.sha256(diff).hexdigest(), 'started_at': stamp, 'status': 'FAIL', 'aborted': True, 'component': args.component, 'prepare_web': args.prepare_web, 'reason': str(error), 'commands': commands}, indent=2) + '\n')
+        (out / 'results.json').write_text(json.dumps({'schema': 1, 'revision': revision, 'checkout_clean': checkout_clean, 'tracked_diff_sha256': hashlib.sha256(diff).hexdigest(), 'started_at': stamp, 'status': 'FAIL', 'aborted': True, 'component': args.component, 'integration_shard': args.integration_shard, 'prepare_web': args.prepare_web, 'reason': str(error), 'commands': commands}, indent=2) + '\n')
         print_public_summary(commands)
 
     def run(name, command, cwd=ROOT, timeout=1200, report=None, childenv=None):
@@ -710,7 +724,8 @@ def main():
                 childenv=dict(env, GOMAXPROCS='1'))
     if args.component != 'source':
         if args.component == 'integration':
-            run('integration', ['./scripts/test-integration.sh', './...'])
+            selection = ['--ci-shard', args.integration_shard] if args.integration_shard else ['./...']
+            run('integration', ['./scripts/test-integration.sh', *selection])
             integration = commands[-1]
         else:
             sqlc = json.loads((ROOT / 'deploy/toolchain.lock.json').read_text())['sqlc']
@@ -725,8 +740,10 @@ def main():
                 raise
         try:
             output = (ROOT / integration['log']).read_text(errors='replace')
-            suites['integration'], logs = harness_results(output, integration['returncode'], 4)
+            suites['integration'], logs = harness_results(output, integration['returncode'], 1 if args.integration_shard else 4)
             integration['test_logs'] = logs
+            if args.integration_shard == 'memory' and ('cheesetrap/internal/reporting', 'TestSecurityAggregateMemory') not in suites['integration']:
+                integration['status'] = 'FAIL'
         except (ValueError, OSError):
             integration['status'] = 'FAIL'
     if args.component != 'integration':
@@ -764,13 +781,13 @@ def main():
     if args.linux_evidence:
         try: linux = linux_results(json.loads(args.linux_evidence.read_text()), args.linux_evidence.resolve().parent, revision)
         except (ValueError, OSError, KeyError) as error: linux_error = str(error)
-    rows = evaluate_component(manifest, suites, args.component) if args.component else evaluate(manifest, suites, linux)
+    rows = evaluate_component(manifest, suites, args.component, args.integration_shard) if args.component else evaluate(manifest, suites, linux)
     status = 'FAIL' if linux_error else run_status(rows, commands, args.automated_only)
     if args.component and status == 'PASS_AUTOMATED': status = 'PASS_COMPONENT'
     report = {'schema': 1, 'revision': revision, 'source_sha256': source_hashes, 'tracked_diff_sha256': hashlib.sha256(diff).hexdigest(), 'checkout_clean': checkout_clean, 'started_at': stamp, 'status': status,
               'environment': {'os': platform.system(), 'release': platform.release(), 'machine': platform.machine(), 'python': platform.python_version()},
               'commands': commands, 'tests': {suite: [dict(package=p, name=n) for p, n in sorted(tests)] for suite, tests in suites.items()},
-              'requirements': rows, 'linux_error': linux_error, 'prepare_web': args.prepare_web, 'component': args.component}
+              'requirements': rows, 'linux_error': linux_error, 'prepare_web': args.prepare_web, 'component': args.component, 'integration_shard': args.integration_shard}
     (out / 'results.json').write_text(json.dumps(report, indent=2) + '\n')
     print_public_summary(commands)
     print(f'{status}: {out.relative_to(ROOT)}/results.json')
