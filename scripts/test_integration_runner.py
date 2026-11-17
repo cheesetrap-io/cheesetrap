@@ -2,6 +2,7 @@
 import importlib.util
 import json
 import os
+import runpy
 import signal
 import sys
 import time
@@ -454,16 +455,55 @@ class OwnedCleanupTests(unittest.TestCase):
         self.assertNotIn("Cleaned isolated project", stdout)
 
 class E2EPreparationSignalTests(unittest.TestCase):
+    @staticmethod
+    def preparation_fixture(npm, ready):
+        pending = ready.with_suffix('.tmp')
+        npm.write_text("#!" + sys.executable + "\nimport os, pathlib, time\n" +
+                       "pathlib.Path(" + repr(str(pending)) + ").write_text(str(os.getpid()))\n" +
+                       "pathlib.Path(" + repr(str(pending)) + ").replace(" + repr(str(ready)) + ")\n" +
+                       "time.sleep(30)\n")
+        npm.chmod(0o700)
+
+    def test_preparation_readiness_is_published_only_after_pid_write(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            ready, npm = root / 'ready', root / 'npm'
+            self.preparation_fixture(npm, ready)
+            opened, release = threading.Event(), threading.Event()
+            original_open = Path.open
+            errors = []
+            def paused_open(path, *args, **kwargs):
+                stream = original_open(path, *args, **kwargs)
+                mode = args[0] if args else kwargs.get('mode', 'r')
+                if path.parent == root and mode == 'w':
+                    opened.set()
+                    if not release.wait(timeout=2):
+                        stream.close()
+                        raise RuntimeError('fixture write was not released')
+                return stream
+            def run_fixture():
+                try: runpy.run_path(str(npm), run_name='__main__')
+                except Exception as error: errors.append(type(error).__name__)
+            with mock.patch.object(Path, 'open', paused_open), mock.patch.object(time, 'sleep'):
+                thread = threading.Thread(target=run_fixture)
+                thread.start()
+                try:
+                    self.assertTrue(opened.wait(timeout=2), 'PID writer did not start')
+                    self.assertFalse(ready.exists(), 'incomplete PID must not advertise readiness')
+                finally:
+                    release.set()
+                    thread.join(timeout=2)
+            self.assertFalse(thread.is_alive(), 'fixture writer did not finish')
+            self.assertEqual(errors, [])
+            self.assertEqual(int(ready.read_text()), os.getpid())
+
     def test_sigterm_during_npm_preparation_terminates_owned_process_group(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             (root / "web").mkdir()
             ready = root / "ready"
             npm = root / "npm"
-            npm.write_text("#!" + sys.executable + "\nimport os, pathlib, time\n" +
-                           "pathlib.Path(" + repr(str(ready)) + ").write_text(str(os.getpid()))\n" +
-                           "time.sleep(30)\n")
-            npm.chmod(0o700)
+            self.preparation_fixture(npm, ready)
             probe = root / "probe.py"
             probe.write_text("""import importlib.util, pathlib, sys
 spec=importlib.util.spec_from_file_location("runner",sys.argv[1])
