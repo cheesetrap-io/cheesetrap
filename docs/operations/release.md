@@ -233,6 +233,13 @@ an error until the caller rolls back its transaction. The live regression checks
 stored bytes, the existing PostgreSQL proof hash, and rollback after a later batch
 fails. The full memory regression retains its original fixture and cgroup limits.
 
+Evidence ownership copies span cursor pages in statements bounded by 1,000 rows
+and 1 MiB of encoded JSON, or one complete oversized row. This leaves signed
+evidence-part boundaries unchanged. Every ownership copy must finish before proof
+sealing; a later copy failure requires rollback of the report, copies and proof.
+The live shared-chunk regression verifies the complete copied content, original
+signed evidence hash, final-copy ordering and rollback after a later batch fails.
+
 Automated acceptance prints `CI_CHECK` status per command and source-defined failed
 test names, files, lines, and fixed categories. It reports process return codes
 separately from report validity. It never publishes dynamic subtest names, runtime

@@ -150,15 +150,78 @@ func (s *DraftService) Next(ctx context.Context) (DraftProgress, error) {
 // the JSON encoder and pgx parameter buffers small; any later failure still
 // rolls back the report, every prior batch, and its revision/candidate together.
 func copyReportEvidence(ctx context.Context, q *db.Queries, reportID pgtype.UUID, evidence []domain.ReportEvidence) error {
-	const batchSize = 1000
-	for start := 0; start < len(evidence); start += batchSize {
-		data, err := json.Marshal(evidence[start:min(start+batchSize, len(evidence))])
+	w := evidenceCopyWriter{ctx: ctx, q: q, reportID: reportID}
+	if err := w.add(evidence); err != nil {
+		return err
+	}
+	return w.flush()
+}
+
+// Ownership copies may span cursor pages; signed proof parts keep their original
+// boundaries. Count and encoded bytes bound pending work, with one complete
+// oversized row alone. The caller owns the transaction and must flush before seal.
+type evidenceCopyWriter struct {
+	ctx      context.Context
+	q        *db.Queries
+	reportID pgtype.UUID
+	pending  []byte
+	count    int
+	err      error
+}
+
+func (w *evidenceCopyWriter) add(evidence []domain.ReportEvidence) error {
+	if w.err != nil {
+		return w.err
+	}
+	for _, row := range evidence {
+		if w.err = w.ctx.Err(); w.err != nil {
+			return w.err
+		}
+		data, err := json.Marshal(row)
 		if err != nil {
+			w.err = err
 			return err
 		}
-		if err := q.CopyReportEvidenceBatch(ctx, db.CopyReportEvidenceBatchParams{ReportID: reportID, Snapshots: data}); err != nil {
-			return err
+		// Include the next comma and closing bracket in the wire-size budget.
+		if w.count > 0 && len(w.pending)+len(data)+2 > 1<<20 {
+			if err := w.flush(); err != nil {
+				return err
+			}
+		}
+		if w.count == 0 {
+			w.pending = append(w.pending, '[')
+		} else {
+			w.pending = append(w.pending, ',')
+		}
+		w.pending = append(w.pending, data...)
+		w.count++
+		if w.count == 1000 || len(w.pending)+1 > 1<<20 {
+			if err := w.flush(); err != nil {
+				return err
+			}
 		}
 	}
+	return nil
+}
+
+func (w *evidenceCopyWriter) flush() error {
+	if w.err != nil || w.count == 0 {
+		return w.err
+	}
+	if w.err = w.ctx.Err(); w.err != nil {
+		return w.err
+	}
+	w.pending = append(w.pending, ']')
+	w.err = w.q.CopyReportEvidenceBatch(w.ctx, db.CopyReportEvidenceBatchParams{ReportID: w.reportID, Snapshots: w.pending})
+	if w.err != nil {
+		return w.err
+	}
+	clear(w.pending)
+	if cap(w.pending) > 1<<20 {
+		w.pending = nil
+	} else {
+		w.pending = w.pending[:0]
+	}
+	w.count = 0
 	return nil
 }
