@@ -139,17 +139,32 @@ func TestSecurityAggregateMemory(t *testing.T) {
 		t.Fatal(err)
 	}
 	binaryPath := filepath.Join(t.TempDir(), "memory.test")
-	build := exec.CommandContext(ctx, "go", "test", "-tags=integration", "-c", "-o", binaryPath, "./internal/reporting")
+	build := exec.CommandContext(ctx, "go", "test", "-x", "-tags=integration", "-c", "-o", binaryPath, "./internal/reporting")
 	build.Dir = root
 	build.Env = append(os.Environ(), "GOOS=linux", "GOARCH="+runtime.GOARCH, "CGO_ENABLED=0")
-	if output, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("Linux child build: %v\n%s", err, output)
+	started := time.Now()
+	timing := func(phase string, compileActions ...int) {
+		t.Helper()
+		row := map[string]any{"phase": phase, "elapsed_ms": time.Since(started).Milliseconds()}
+		if len(compileActions) == 1 {
+			row["compile_actions"] = compileActions[0]
+		}
+		encoded, _ := json.Marshal(row)
+		t.Logf("MEMORY_TIMING %s", encoded)
+		started = time.Now()
+	}
+	buildOutput, err := build.CombinedOutput()
+	if err != nil {
+		t.Fatalf("Linux child build: %v\n%s", err, buildOutput)
 	}
 	// The runner's private umask creates mode 0700; the container runs as a
 	// different UID. Grant access only to this read-only test executable.
 	if err := os.Chmod(binaryPath, 0o755); err != nil {
 		t.Fatalf("Linux child executable permissions: %v", err)
 	}
+	// Keep the captured compiler trace private. Only the action count
+	// and elapsed milliseconds are projected into the public CI summary.
+	timing("child_build", strings.Count(string(buildOutput), "/compile -o "))
 	child := func(mode string) {
 		t.Helper()
 		u, err := url.Parse(os.Getenv("CHEESETRAP_TEST_MEMORY_WORKER_URL"))
@@ -190,7 +205,9 @@ func TestSecurityAggregateMemory(t *testing.T) {
 SELECT '10000000-0000-4000-8000-000000000999','20000000-0000-4000-8000-000000000999',n,n,1,'web',$1,$1,'1.1.1.1',12345,'8.8.8.8',8080,'http','web.request',jsonb_set($2::jsonb,'{uri}',to_jsonb((ARRAY['/.env','/.git/config','/wp-login.php','/wp-admin','/phpmyadmin'])[1+n%5])),repeat('a',64) FROM generate_series(1,$3::integer+1)n`, at, attrs, memoryFixtureCount)
 	run(`INSERT INTO cheesetrap.detection_completions(ingestion_seq,event_id,rule_set_version,settings_version) SELECT ingestion_seq,event_id,'1',1 FROM cheesetrap.events WHERE ingestion_seq<=$1`, memoryFixtureCount)
 	run(`UPDATE cheesetrap.processing_cursors SET ingested_seq=$1,detected_seq=$2`, memoryFixtureCount+1, memoryFixtureCount)
+	timing("payload_fixture")
 	child("detection")
+	timing("payload_detection")
 	var count int
 	var scheme string
 	if err = owner.QueryRow(ctx, `SELECT evidence_count,evidence_hash_scheme FROM cheesetrap.detection_results`).Scan(&count, &scheme); err != nil || count != memoryFixtureCount+1 || scheme != "sha256-chain-v2" {
@@ -199,7 +216,9 @@ SELECT '10000000-0000-4000-8000-000000000999','20000000-0000-4000-8000-000000000
 	// Same-cardinality compact control and immutable replay preserve every ID.
 	run(`UPDATE cheesetrap.events SET attributes=attributes-'body'-'headers'`)
 	run(`UPDATE cheesetrap.processing_cursors SET detected_seq=$1`, memoryFixtureCount)
+	timing("replay_fixture")
 	child("detection")
+	timing("replay_detection")
 	if err = owner.QueryRow(ctx, `SELECT count(*) FROM cheesetrap.detection_results`).Scan(&count); err != nil || count != 1 {
 		t.Fatal("replay duplicated proof", err)
 	}
@@ -211,7 +230,9 @@ SELECT '10000000-0000-4000-8000-000000000999','20000000-0000-4000-8000-000000000
 SELECT 'WEB-EXPLOIT','1','path-traversal-etc-passwd','1',event_id,ingestion_seq,source_ip,observed_at-interval '10 minutes',observed_at,cheesetrap.evidence_set_hash(ARRAY[event_id]),1,true,false,'{}' FROM cheesetrap.events WHERE ingestion_seq<=$1`, memoryFixtureCount)
 	run(`INSERT INTO cheesetrap.detection_evidence(detection_id,event_id) SELECT detection_id,processing_event_id FROM cheesetrap.detection_results`)
 	run(`INSERT INTO cheesetrap.report_windows(start_at,end_at,settings_version,state,sealed_seq,sealed_at,ready_at) VALUES($1,$2,1,'ready',$3,$2,$2)`, at.Add(-24*time.Hour), at, memoryFixtureCount+1)
+	timing("draft_fixture")
 	child("draft")
+	timing("draft")
 	var rules int
 	var size int
 	if err = owner.QueryRow(ctx, `SELECT evidence_count,rule_count,octet_length(v.snapshot::text) FROM cheesetrap.report_proofs p JOIN cheesetrap.report_revisions v USING(report_id) WHERE sealed`).Scan(&count, &rules, &size); err != nil || count != memoryFixtureCount || rules != memoryFixtureCount || size > 4096 {
@@ -221,9 +242,13 @@ SELECT 'WEB-EXPLOIT','1','path-traversal-etc-passwd','1',event_id,ingestion_seq,
 		t.Fatal("ownership copies incomplete", count, err)
 	}
 	t.Logf("complete draft: evidence=%d rules=%d signed snapshot=%d bytes", count, rules, size)
+	timing("draft_assertions")
 	child("revision")
+	timing("revision")
 	seedWideRuleProof(t, ctx, owner, at)
+	timing("wide_fixture")
 	child("wide-rules")
+	timing("wide_revision")
 }
 
 // WEB-EXPLOIT retains distinct matching paths in each explanation. Every path

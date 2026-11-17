@@ -214,6 +214,14 @@ this diagnostic projection. Raw events and runtime output stay private. Package
 times are separate observations, not additive wall time across concurrent batches;
 their presence never changes command or acceptance status.
 
+The integration summary also projects up to 11 fixed memory-regression phases:
+the child build, fixture preparation, detection and replay, draft checks, revision,
+and wide-rule proof. Each has bounded integer milliseconds; the child-build row
+also has a bounded compiler-action count from the private Go `-x` trace. Unknown
+fields, malformed values, and ambiguous duplicate phases are omitted. These are
+diagnostics only: raw compiler commands, payloads, DB details and child output
+remain private, and no timing or count changes the acceptance verdict.
+
 Automated acceptance prints `CI_CHECK` status per command and source-defined failed
 test names, files, lines, and fixed categories. It reports process return codes
 separately from report validity. It never publishes dynamic subtest names, runtime

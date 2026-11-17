@@ -407,15 +407,9 @@ def public_integration_timings(output):
     return timings
 
 
-def public_package_timings(logs, sources):
-    """Project bounded package durations; never expose test names or raw events."""
-    allowed = set()
-    for name in sources:
-        if re.fullmatch(r'(?:[A-Za-z0-9_-]+/)*[A-Za-z0-9_.-]+\.go', name):
-            directory = str(Path(name).parent)
-            allowed.add('cheesetrap' + ('/' + directory if directory != '.' else ''))
-    if not isinstance(logs, list): return []
-    timings = []
+def private_test_outputs(logs):
+    """Read only private batch logs confined to the ignored evidence directory."""
+    if not isinstance(logs, list): return
     for batch, relative in enumerate(logs[:64], 1):
         if not isinstance(relative, str) or not re.fullmatch(r'\.local/[A-Za-z0-9_./-]+\.jsonl', relative):
             continue
@@ -425,6 +419,18 @@ def public_package_timings(logs, sources):
             output = path.read_text(errors='replace')
         except (OSError, RuntimeError):
             continue
+        yield batch, output
+
+
+def public_package_timings(logs, sources):
+    """Project bounded package durations; never expose test names or raw events."""
+    allowed = set()
+    for name in sources:
+        if re.fullmatch(r'(?:[A-Za-z0-9_-]+/)*[A-Za-z0-9_.-]+\.go', name):
+            directory = str(Path(name).parent)
+            allowed.add('cheesetrap' + ('/' + directory if directory != '.' else ''))
+    timings = []
+    for batch, output in private_test_outputs(logs):
         values, ambiguous = {}, set()
         for line in output.splitlines():
             try: event = json.loads(line)
@@ -438,6 +444,39 @@ def public_package_timings(logs, sources):
         for package in sorted(values.keys() - ambiguous):
             timings.append({'batch': batch, 'package': package, 'elapsed_ms': values[package]})
             if len(timings) == 64: return timings
+    return timings
+
+
+def public_memory_timings(logs):
+    """Expose only fixed memory-test phases and bounded numeric observations."""
+    phases = {'child_build', 'payload_fixture', 'payload_detection', 'replay_fixture',
+              'replay_detection', 'draft_fixture', 'draft', 'draft_assertions',
+              'revision', 'wide_fixture', 'wide_revision'}
+    timings = []
+    for batch, output in private_test_outputs(logs):
+        values, ambiguous = {}, set()
+        for line in output.splitlines():
+            try: event = json.loads(line)
+            except (ValueError, RecursionError): continue
+            if not isinstance(event, dict) or event.get('Action') != 'output': continue
+            if event.get('Package') != 'cheesetrap/internal/reporting' or event.get('Test') != 'TestSecurityAggregateMemory': continue
+            if not isinstance(event.get('Output'), str): continue
+            match = re.search(r'\bMEMORY_TIMING (\{[^\r\n]*\})\s*$', event['Output'])
+            if not match: continue
+            try: row = json.loads(match[1])
+            except (ValueError, RecursionError): continue
+            if not isinstance(row, dict) or not isinstance(row.get('phase'), str) or row['phase'] not in phases: continue
+            expected = {'phase', 'elapsed_ms'} | ({'compile_actions'} if row['phase'] == 'child_build' else set())
+            if set(row) != expected: continue
+            if type(row['elapsed_ms']) is not int or not 0 <= row['elapsed_ms'] <= 1200000: continue
+            if 'compile_actions' in row and (type(row['compile_actions']) is not int or not 0 <= row['compile_actions'] <= 10000): continue
+            phase = row['phase']
+            if phase in values: ambiguous.add(phase)
+            else: values[phase] = row
+        for phase, row in values.items():
+            if phase in ambiguous: continue
+            timings.append({'batch': batch, **row})
+            if len(timings) == 11: return timings
     return timings
 
 
@@ -458,6 +497,9 @@ def print_public_summary(commands):
         if name in ('integration', 'e2e'):
             packages = public_package_timings(command.get('test_logs'), sources)
             if packages: row['package_timings'] = packages
+        if name == 'integration':
+            memory = public_memory_timings(command.get('test_logs'))
+            if memory: row['memory_timings'] = memory
         if name == 'ui':
             _, diagnostics = ui_check(ROOT / command['report'], command.get('returncode'), sources,
                                       command.get('process_status', 'exited'))
