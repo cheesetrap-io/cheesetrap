@@ -28,14 +28,19 @@ because source tests do not need Chromium. After Go unit/vet, the pinned SQL
 compiler prepares alongside UI tests with its existing `-p=1` and `GOMAXPROCS=1`.
 Both results are required before the UI build and source generators; a failed
 compiler process, UI process, or missing/invalid UI report remains a failure.
-The browser component prepares locked
-npm dependencies, Chromium's headless shell and system libraries before the
-existing isolated Go E2E/browser harness. Setup is a required command in each private result. A failed
-setup stops before E2E. Successful setup passes `--prepared-web` to E2E, which
-reuses npm/browser dependencies, rebuilds UI assets and runs the same complete
-Go/browser suite. The explicit component gate still requires the successful
-`web-prepare` command. Without web preparation, E2E retains its independent full
-dependency setup. Cancellation stops owned process groups and
+The browser component prepares locked npm dependencies, Chromium's headless shell
+and system libraries while the existing E2E harness starts its one owned
+PostgreSQL stack, creates roles and migrates databases. Web preparation retains
+its single-CPU Go environment; the E2E lane retains its original environment.
+A fresh private completion file releases the UI build and complete Go/browser
+suite only after preparation succeeds. Missing, failed, malformed, stale or
+non-private status cannot supply a pass. Setup and E2E remain two required command
+results, and the explicit component gate still requires successful `web-prepare`.
+An installation failure never falls back to a second installation attempt. Each
+lane's `Running`/`Completed` lines show its elapsed interval; overlapping intervals
+must not be added as PR wait. `--prepared-web-status` accepts only a private current
+acceptance status path. Standalone E2E, `--prepared-web`, and local complete
+acceptance retain their preparation order. Cancellation stops owned process groups and
 waits for cleanup. Local complete acceptance prepares web dependencies and Chromium
 alongside Python only with `--automated-only --prepare-web`. Both Playwright
 configurations use headless Chromium without a browser channel or executable

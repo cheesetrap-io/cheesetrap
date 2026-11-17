@@ -178,6 +178,83 @@ except runner.IntegrationInterrupted:
 
 
 class ResultsTests(unittest.TestCase):
+    def test_web_preparation_status_requires_private_owned_pass_and_rejects_unknown(self):
+        wait = getattr(RUNNER, 'wait_for_web_preparation', None)
+        self.assertTrue(callable(wait), 'DB preparation needs a fail-closed web completion barrier')
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            status = root / '.local/acceptance/run/web-preparation.status'
+            status.parent.mkdir(parents=True, mode=0o700)
+            with mock.patch.object(RUNNER, 'ROOT', root):
+                for text, mode, accepted in [('PASS\n', 0o600, True), ('FAIL\n', 0o600, False),
+                                             ('PASS\nextra', 0o600, False), ('', 0o600, False),
+                                             ('PASS\n', 0o644, False)]:
+                    with self.subTest(text=text, mode=mode):
+                        status.write_text(text); status.chmod(mode)
+                        if accepted: wait(status, timeout=0)
+                        else:
+                            with self.assertRaises((ValueError, RuntimeError)): wait(status, timeout=0)
+                status.unlink()
+                with self.assertRaises(RuntimeError): wait(status, timeout=0)
+                outside = root / 'outside'
+                outside.write_text('PASS\n'); outside.chmod(0o600)
+                status.symlink_to(outside)
+                with self.assertRaises((ValueError, RuntimeError)): wait(status, timeout=0)
+                with self.assertRaises((ValueError, RuntimeError)): wait(outside, timeout=0)
+
+    def test_status_gated_e2e_prepares_database_before_ui_and_cleans_up_every_outcome(self):
+        for mode in ('success', 'web-failed', 'ui-failed', 'cancelled'):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                (root / 'web').mkdir()
+                (root / 'deploy').mkdir()
+                (root / 'deploy/test-bootstrap.sql').write_text('-- synthetic bootstrap\n')
+                status = root / '.local/acceptance/run/web-preparation.status'
+                status.parent.mkdir(parents=True, mode=0o700)
+                status.write_text('FAIL\n' if mode == 'web-failed' else 'PASS\n')
+                status.chmod(0o600)
+                events = []
+                class Owner:
+                    def __init__(self, *args): pass
+                    def start(self): events.append('database-start'); return '1' * 64, '5432'
+                    def close(self): events.append('cleanup')
+                def command(argv, **kwargs):
+                    if argv[:3] == ['go', 'run', './scripts/list-integration-tests.go']:
+                        return 0, json.dumps([{'Package': 'cheesetrap/tests/acceptance', 'Test': 'TestFlow'}])
+                    if argv[:3] == ['docker', 'context', 'show']: return 0, 'fixture'
+                    if argv[:3] == ['docker', 'context', 'inspect']:
+                        return 0, json.dumps([{'Endpoints': {'docker': {'Host': 'unix:///synthetic.sock'}}}])
+                    if argv[:3] == ['go', 'run', './cmd/cheesetrap']:
+                        events.append('migrate'); return 0, ''
+                    if argv[0] == 'npm':
+                        self.assertEqual(argv, ['npm', 'run', 'build'], 'prepared mode must never reinstall')
+                        self.assertIn('migrate', events)
+                        events.append('ui-build')
+                        if mode == 'cancelled': raise RUNNER.IntegrationInterrupted('synthetic cancellation')
+                        return (19 if mode == 'ui-failed' else 0), ''
+                    if argv[:2] == ['go', 'test']:
+                        self.assertIn('ui-build', events); events.append('tests')
+                        return 0, output(dict(Action='pass', Package='cheesetrap/tests/acceptance', Test='TestFlow'))
+                    return 0, '18.4'
+                with mock.patch.object(RUNNER, 'ROOT', root), \
+                     mock.patch.object(RUNNER, 'OwnedPostgres', Owner), \
+                     mock.patch.object(RUNNER, 'run_command', side_effect=command), \
+                     mock.patch.object(RUNNER.signal, 'signal'), \
+                     mock.patch.object(sys, 'argv', ['test-e2e.py', '--prepared-web-status', str(status.relative_to(root))]), \
+                     mock.patch.dict(os.environ, {'PATH': os.environ['PATH']}, clear=True), \
+                     contextlib.redirect_stdout(io.StringIO()):
+                    try:
+                        if mode == 'success': self.assertEqual(RUNNER.main(e2e=True), 0)
+                        else:
+                            with self.assertRaises((RuntimeError, RUNNER.IntegrationInterrupted)):
+                                RUNNER.main(e2e=True)
+                    except ValueError:
+                        self.fail('E2E must accept its private web barrier and prepare the owned database first')
+                self.assertEqual(events[0], 'database-start')
+                self.assertEqual(events[-1], 'cleanup')
+                if mode != 'success': self.assertNotIn('tests', events)
+                if mode == 'web-failed': self.assertNotIn('ui-build', events)
+
     def test_prepared_e2e_keeps_ui_build_and_does_not_retry_missing_dependencies(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
