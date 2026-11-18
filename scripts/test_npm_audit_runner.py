@@ -3,8 +3,10 @@ import datetime as dt
 import importlib.util
 import json
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
+from unittest import mock
 
 SPEC = importlib.util.spec_from_file_location('npm_audit', Path(__file__).with_name('npm-audit.py'))
 AUDIT = importlib.util.module_from_spec(SPEC)
@@ -101,6 +103,63 @@ class NpmAuditGateTests(unittest.TestCase):
             with self.subTest(bad=bad):
                 with self.assertRaises(ValueError):
                     self.evaluate(audit_report, lock(), [bad])
+
+    def test_entries_the_gate_cannot_interpret_fail_closed(self):
+        reviewed = vulnerability('picomatch', [advisory('picomatch', PICOMATCH)])
+        cases = {
+            'missing via': {**vulnerability('other', []), 'via': None},
+            'empty via': vulnerability('other', []),
+            'dangling reference': vulnerability('other', ['missing-package']),
+            'unknown entry severity': vulnerability('other', ['picomatch'], severity='unknown'),
+            'unknown advisory severity': vulnerability(
+                'other', [advisory('other', 'GHSA-2222-3333-4444', severity='unknown')]),
+            'missing nodes': {**vulnerability('other', ['picomatch']), 'nodes': []},
+        }
+        for name, broken in cases.items():
+            with self.subTest(name):
+                with self.assertRaises(ValueError):
+                    self.evaluate(report(reviewed, broken), lock(picomatch=True, other=True), [exception()])
+
+    def test_reference_cycle_without_an_advisory_fails_closed(self):
+        audit_report = report(vulnerability('a', ['b']), vulnerability('b', ['a']))
+        with self.assertRaises(ValueError):
+            self.evaluate(audit_report, lock(a=True, b=True), [])
+
+    def test_unreported_production_copy_in_lockfile_still_blocks_exception(self):
+        audit_report = report(vulnerability('picomatch', [advisory('picomatch', PICOMATCH)]))
+        lockfile = lock(picomatch=True)
+        lockfile['packages']['node_modules/app/node_modules/picomatch'] = {'version': '4.0.7'}
+        problems = self.evaluate(audit_report, lockfile, [exception()])
+        self.assertEqual(len(problems), 1)
+        self.assertIn('node_modules/app/node_modules/picomatch', problems[0])
+
+    def test_nested_dev_copies_are_allowed(self):
+        audit_report = report(vulnerability('picomatch', [advisory('picomatch', PICOMATCH)]))
+        lockfile = lock(picomatch=True)
+        lockfile['packages']['node_modules/vite/node_modules/picomatch'] = {'version': '4.0.6', 'dev': True}
+        self.assertEqual(self.evaluate(audit_report, lockfile, [exception()]), [])
+
+    def test_similar_package_names_are_not_treated_as_copies(self):
+        audit_report = report(vulnerability('picomatch', [advisory('picomatch', PICOMATCH)]))
+        lockfile = lock(picomatch=True)
+        lockfile['packages']['node_modules/not-picomatch'] = {'version': '1.0.0'}
+        self.assertEqual(self.evaluate(audit_report, lockfile, [exception()]), [])
+
+    def test_npm_exit_code_must_match_its_report(self):
+        vulnerable = report(vulnerability('picomatch', [advisory('picomatch', PICOMATCH)]))
+        AUDIT.check_exit_code(1, vulnerable)
+        AUDIT.check_exit_code(0, report())
+        for code, audit_report in ((2, vulnerable), (0, vulnerable), (1, report()), (-9, report())):
+            with self.subTest(code=code):
+                with self.assertRaises(ValueError):
+                    AUDIT.check_exit_code(code, audit_report)
+
+    def test_npm_run_with_abnormal_exit_fails_even_with_valid_json(self):
+        completed = subprocess.CompletedProcess([], 2, stdout=json.dumps(report(
+            vulnerability('picomatch', [advisory('picomatch', PICOMATCH)]))))
+        with mock.patch.object(AUDIT.subprocess, 'run', return_value=completed):
+            with self.assertRaises(ValueError):
+                AUDIT.run_npm_audit()
 
     def test_command_line_reads_saved_report(self):
         with tempfile.TemporaryDirectory() as tmp:
