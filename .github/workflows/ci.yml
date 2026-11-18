@@ -61,7 +61,8 @@ jobs:
         with:
           node-version: '22.23.1'
       - name: Audit locked npm dependencies without lifecycle scripts
-        run: npm --prefix web audit --package-lock-only --ignore-scripts --audit-level=low
+        # Fails at low severity or above, except reviewed dev-only advisories in web/npm-audit-exceptions.json.
+        run: python3 -B scripts/npm-audit.py
       - name: Check Go call paths on both Linux architectures
         # An npm audit failure must not hide Go findings; either failure still fails this job.
         if: ${{ !cancelled() }}

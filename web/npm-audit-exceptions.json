@@ -1,0 +1,10 @@
+{
+  "exceptions": [
+    {
+      "advisory": "GHSA-fc5q-39xc-vjpf",
+      "package": "picomatch",
+      "review_by": "2026-12-18",
+      "reason": "No patched picomatch release exists. picomatch is a dev-only dependency of vite, vitest, tinyglobby, fdir, and orval, and its glob patterns come from repository build and test configuration, not from users or sensor input."
+    }
+  ]
+}
