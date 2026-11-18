@@ -1,8 +1,10 @@
 """Process-level regression tests for Python CI collection and failure gates."""
 import importlib.util
+import ast
 import json
 import os
 import signal
+import socket
 import time
 from pathlib import Path
 import subprocess
@@ -131,21 +133,133 @@ elif sys.argv[1] == 'start':
                 process.kill()
                 process.communicate()
 
-    def test_regression_failure_and_timeout_stop_before_later_files(self):
-        import shutil
+    def isolated_regressions(self):
+        # Replace only the fixed inventory; execute the real CLI and gate code.
         local = self.root / 'scripts/test-python.py'
-        local.parent.mkdir()
-        shutil.copyfile(SCRIPT, local)
-        fixture = local.with_name('test_injected_runner.py')
-        for body, expected in [('import unittest\nclass T(unittest.TestCase):\n def test_it(self): self.fail("injected")', 1),
-                               ('import time; time.sleep(30)', 124)]:
-            with self.subTest(expected=expected):
-                fixture.write_text(body)
-                result = subprocess.run([sys.executable, '-B', str(local), 'regression', '--timeout', '0.3'],
-                                        text=True, capture_output=True, timeout=6)
-                self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
-                self.assertNotIn('PASS_PYTHON_REGRESSION', result.stdout)
-                self.assertNotIn('Running Python regression: scripts/test_backup_restore.py', result.stdout)
+        local.parent.mkdir(exist_ok=True)
+        tree = ast.parse(SCRIPT.read_text())
+        inventory = next(n for n in tree.body if isinstance(n, ast.Assign) and
+                         any(isinstance(t, ast.Name) and t.id == 'REGRESSIONS' for t in n.targets))
+        inventory.value = ast.Tuple(elts=[], ctx=ast.Load())
+        local.write_text(ast.unparse(ast.fix_missing_locations(tree)) + '\n')
+        return local
+
+    def coordinated_regressions(self, address, *, fail=False, descendants=False):
+        local = self.isolated_regressions()
+        (self.root / 'state').write_text(json.dumps(dict(active=0, maximum=0, started=[], finished=[])))
+        for index in range(4):
+            fixture = local.with_name(f'test_{index:02}_runner.py')
+            fixture.write_text('''import fcntl,json,os,pathlib,socket,subprocess,sys,unittest
+root=pathlib.Path(__file__).resolve().parents[1]
+def update(start):
+ with (root/'state').open('r+') as stream:
+  fcntl.flock(stream,fcntl.LOCK_EX)
+  state=json.load(stream);state['active']+=1 if start else -1
+  state['maximum']=max(state['maximum'],state['active'])
+  state['started' if start else 'finished'].append(INDEX)
+  stream.seek(0);json.dump(state,stream);stream.truncate()
+class T(unittest.TestCase):
+ def test_it(self):
+  child=None
+  if DESCENDANTS:
+   code="import pathlib,signal,sys\\ndef done(*args):\\n pathlib.Path(sys.argv[1]).touch();sys.exit(0)\\nsignal.signal(signal.SIGTERM,done)\\nprint('ready',flush=True)\\nsignal.pause()"
+   child=subprocess.Popen([sys.executable,'-c',code,str(root/('term-'+str(INDEX)))],stdout=subprocess.PIPE,text=True)
+   self.assertEqual(child.stdout.readline().strip(),'ready')
+  update(True)
+  try:
+   with socket.create_connection(ADDRESS,timeout=5) as connection:
+    connection.sendall((json.dumps(dict(index=INDEX,pid=os.getpid(),child=child.pid if child else None))+'\\n').encode())
+    self.assertEqual(connection.recv(1),b'x')
+   if FAIL and INDEX in (0,2):self.fail('synthetic suite failure')
+  finally:
+   if child:
+    child.wait(timeout=3);child.stdout.close()
+   update(False)
+'''.replace('INDEX', str(index)).replace('ADDRESS', repr(address))
+                .replace('DESCENDANTS', repr(descendants)).replace('FAIL', repr(fail)))
+        return local
+
+    def test_regression_suites_overlap_bounded_once_and_keep_other_results_after_failure(self):
+        for failed in (False, True):
+            with self.subTest(failed=failed), socket.socket() as server:
+                server.bind(('127.0.0.1', 0)); server.listen(4); server.settimeout(2)
+                local = self.coordinated_regressions(server.getsockname(), fail=failed)
+                process = subprocess.Popen([sys.executable, '-B', str(local), 'regression', '--timeout', '5'],
+                                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                connections = []
+                try:
+                    for _ in range(2):
+                        try: connection, _ = server.accept()
+                        except socket.timeout: self.fail('two independent regression suites must start together')
+                        connection.recv(1024); connections.append(connection)
+                    server.settimeout(.1)
+                    with self.assertRaises(socket.timeout): server.accept()
+                    connections[0].sendall(b'x'); connections[0].close()
+                    server.settimeout(2)
+                    connection, _ = server.accept(); connection.recv(1024); connections.append(connection)
+                    for connection in connections[1:]: connection.sendall(b'x'); connection.close()
+                    connection, _ = server.accept(); connection.recv(1024); connections.append(connection)
+                    connection.sendall(b'x'); connection.close()
+                    stdout, stderr = process.communicate(timeout=6)
+                    self.assertEqual(process.returncode, 1 if failed else 0, stdout+stderr)
+                    state = json.loads((self.root / 'state').read_text())
+                    self.assertEqual(state['maximum'], 2)
+                    self.assertEqual(state['active'], 0)
+                    self.assertEqual(sorted(state['started']), list(range(4)))
+                    self.assertEqual(sorted(state['finished']), list(range(4)))
+                    self.assertEqual('PASS_PYTHON_REGRESSION' in stdout, not failed)
+                    if failed:
+                        for index in (0, 2):
+                            self.assertIn(f'FAIL: Python regression exited 1: scripts/test_{index:02}_runner.py', stderr)
+                finally:
+                    for connection in connections: connection.close()
+                    if process.poll() is None:
+                        process.send_signal(signal.SIGTERM); process.communicate(timeout=6)
+
+    def test_regression_timeout_does_not_hide_or_omit_other_files(self):
+        local = self.isolated_regressions()
+        local.with_name('test_00_runner.py').write_text('import threading\nthreading.Event().wait()\n')
+        for index in range(1, 4):
+            local.with_name(f'test_{index:02}_runner.py').write_text('import unittest\nfrom pathlib import Path\nclass T(unittest.TestCase):\n def test_it(self): Path('+repr(str(self.root / str(index)))+').touch()\n')
+        result = subprocess.run([sys.executable, '-B', str(local), 'regression', '--timeout', '.3'],
+                                capture_output=True, text=True, timeout=6)
+        self.assertEqual(result.returncode, 124, result.stdout+result.stderr)
+        self.assertTrue(all((self.root / str(index)).exists() for index in range(1, 4)))
+        self.assertNotIn('PASS_PYTHON_REGRESSION', result.stdout)
+
+    def test_regression_cancellation_stops_both_groups_and_descendants_without_launching_queued_files(self):
+        with socket.socket() as server:
+            server.bind(('127.0.0.1', 0)); server.listen(4); server.settimeout(2)
+            local = self.coordinated_regressions(server.getsockname(), descendants=True)
+            process = subprocess.Popen([sys.executable, '-B', str(local), 'regression', '--timeout', '5'],
+                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            connections, children = [], []
+            try:
+                for _ in range(2):
+                    try: connection, _ = server.accept()
+                    except socket.timeout: self.fail('cancellation fixture needs two live owned suite groups')
+                    connections.append(connection)
+                    data = json.loads(connection.recv(1024))
+                    self.assertEqual(os.getpgid(data['child']), data['pid'])
+                    children.append(data)
+                process.send_signal(signal.SIGTERM)
+                stdout, stderr = process.communicate(timeout=6)
+                self.assertEqual(process.returncode, 143, stdout+stderr)
+                state = json.loads((self.root / 'state').read_text())
+                self.assertEqual(sorted(state['started']), [0, 1])
+                self.assertEqual(state['active'], 0)
+                for data in children:
+                    self.assertTrue((self.root / ('term-'+str(data['index']))).is_file())
+                    for pid in (data['pid'], data['child']):
+                        with self.assertRaises(ProcessLookupError): os.kill(pid, 0)
+                self.assertNotIn('PASS_PYTHON_REGRESSION', stdout)
+            finally:
+                for connection in connections: connection.close()
+                if process.poll() is None:
+                    process.send_signal(signal.SIGTERM); process.communicate(timeout=6)
+                for data in children:
+                    try: os.killpg(data['pid'], signal.SIGKILL)
+                    except ProcessLookupError: pass
 
     def test_failed_python_command_cannot_produce_pass_automated(self):
         fixture = self.root / 'test_fixture.py'
