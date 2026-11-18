@@ -48,7 +48,7 @@ are in the inventory and `go.mod`/`go.sum`; notices must be refreshed when those
 inputs change.
 
 The UI includes React 19.3.1, React DOM 19.3.1 and scheduler 0.28.0 (MIT).
-Their original Meta copyright notices and full licenses are bundled. Vite 8.3.4
+Their original Meta copyright notices and full licenses are bundled. Vite 8.3.7
 also injects a modulepreload polyfill into the delivered JavaScript; although Vite
 is declared as a devDependency, this helper is runtime code. Its complete
 [upstream LICENSE.md](third_party/licenses/npm/vite-LICENSE.md), including the
