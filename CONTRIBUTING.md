@@ -180,8 +180,18 @@ Dependency PRs must pass the `Dependency vulnerabilities` CI job. Audit the full
 npm lock graph without lifecycle scripts:
 
 ```sh
-npm --prefix web audit --package-lock-only --ignore-scripts --audit-level=low
+python3 -B scripts/npm-audit.py
 ```
+
+The gate runs `npm --prefix web audit --package-lock-only --ignore-scripts --json` and
+fails on any advisory at low severity or above. The only exceptions are entries in
+`web/npm-audit-exceptions.json`, which need a GHSA id, package, reason, and
+`review_by` date. Add an exception only when no fixed version exists and every
+copy of the package in `web/package-lock.json` is dev-only. The gate fails when an
+exception covers a production copy, passes its `review_by` date, or is no longer
+reported. It also fails closed on an npm exit code other than 0 or 1, an exit code
+that disagrees with the report, an unknown severity, or an entry whose `via` chain
+does not reach an advisory. `info` is the only severity it skips.
 
 Check Go call paths on Linux AMD64 and ARM64 with govulncheck v1.9.0 in plain-text
 mode, as described in the [release vulnerability gate](docs/operations/release.md#source-only-public-release).
