@@ -65,9 +65,10 @@ At the selected public commit, require successful `Secret scan`,
 The target is [cheesetrap-io/cheesetrap](https://github.com/cheesetrap-io/cheesetrap).
 Dependency review and full candidate acceptance remain separate release gates.
 
-`Dependency vulnerabilities` audits the npm lock graph without lifecycle scripts
-and uses pinned govulncheck v1.9.0 for Linux AMD64 and ARM64 Go call paths. Plain-text
-Go output propagates vulnerability detection as nonzero failure. Database lookup
+`Dependency vulnerabilities` audits the npm lock graph without lifecycle scripts,
+allowing only the reviewed dev-only advisories in `web/npm-audit-exceptions.json`
+([exception policy](../../CONTRIBUTING.md#update-dependencies)), and uses pinned
+govulncheck v1.9.0 for Linux AMD64 and ARM64 Go call paths. Plain-text Go output propagates vulnerability detection as nonzero failure. Database lookup
 errors also fail. Advisories judged unreachable still need separate review.
 Passing does not establish that container OS or Python packages have no vulnerabilities.
 
