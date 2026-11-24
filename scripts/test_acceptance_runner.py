@@ -2,6 +2,7 @@ import copy
 import argparse
 import contextlib
 import hashlib
+import tarfile
 import importlib.util
 import io
 import json
@@ -20,7 +21,7 @@ runner = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(runner)
 
 class AcceptanceGateTests(unittest.TestCase):
-    def exercise_initial_preparation(self, *, prepare_web=True, failed='', component=None, stop_at='go'):
+    def exercise_initial_preparation(self, *, prepare_web=True, release_sqlc=False, failed='', component=None, stop_at='go'):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             coverage = root / 'tests/acceptance/coverage.json'
@@ -55,12 +56,12 @@ class AcceptanceGateTests(unittest.TestCase):
                     self.assertEqual(kwargs['env'].get('GOMAXPROCS'), '1', 'SQL preparation keeps its CPU bound')
                 else:
                     self.assertNotIn('GOMAXPROCS', kwargs['env'], 'test execution settings stay unchanged')
-                if argv[0] == stop_at:
+                if argv[0] == stop_at or (stop_at == 'sql-generate' and argv[-1] == 'generate'):
                     raise runner.AcceptanceTimeout('fixture stops after initial barrier')
                 kwargs['log'].write_text('')
                 return 9 if argv[0] == './scripts/prepare-ci-web.sh' and failed == 'web-prepare' else 0
 
-            args = argparse.Namespace(prepare_web=prepare_web, automated_only=True, linux_evidence=None,
+            args = argparse.Namespace(prepare_web=prepare_web, release_sqlc=release_sqlc, automated_only=True, linux_evidence=None,
                                       component=component, integration_shard=None)
             with mock.patch.object(runner, 'ROOT', root), \
                  mock.patch.dict(os.environ, {'PATH': os.environ['PATH']}, clear=True), \
@@ -82,6 +83,46 @@ class AcceptanceGateTests(unittest.TestCase):
                         runner.main()
             result = json.loads(next((root / '.local/acceptance').glob('*/results.json')).read_text())
             return events, result
+
+    def test_release_sqlc_only_publishes_a_verified_binary(self):
+        script = runner.ROOT / 'scripts/prepare-release-sqlc.sh'
+        self.assertTrue(script.is_file(), 'source CI needs a verified sqlc release installer')
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            curl = root / 'curl'
+            curl.write_text('#!/bin/sh\ncat "$FIXTURE"\n')
+            curl.chmod(0o700)
+            archive = root / 'fixture.tar.gz'
+            binary = root / 'fixture'
+            binary.write_text('#!/bin/sh\nprintf "v%s\\n" "$REPORTED_VERSION"\n')
+            with tarfile.open(archive, 'w:gz') as tar:
+                tar.add(binary, arcname='sqlc')
+            digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+            for label, reported, expected_hash, ok in (
+                ('corrupt', '1.31.1', '0' * 64, False),
+                ('wrong-version', '9.9.9', digest, False),
+                ('verified', '1.31.1', digest, True),
+            ):
+                with self.subTest(label=label):
+                    out = root / label
+                    out.mkdir()
+                    env = dict(os.environ, FIXTURE=str(archive), REPORTED_VERSION=reported,
+                               PATH=str(root) + os.pathsep + os.environ['PATH'])
+                    result = subprocess.run([str(script), str(out), '1.31.1', expected_hash],
+                                            env=env, capture_output=True, timeout=5)
+                    self.assertEqual(result.returncode == 0, ok)
+                    self.assertEqual((out / 'sqlc').exists(), ok)
+                    if ok:
+                        self.assertEqual((out / 'sqlc').read_bytes(), binary.read_bytes())
+
+    def test_source_generates_sql_with_the_release_it_prepared(self):
+        events, result = self.exercise_initial_preparation(component='source', release_sqlc=True,
+                                                          stop_at='sql-generate')
+        checks = {row['name']: row for row in result['commands']}
+        prepare = checks['sql-prepare']['command']
+        self.assertEqual(prepare[0], './scripts/prepare-release-sqlc.sh')
+        self.assertEqual(events[-1], [str(Path(prepare[1]) / 'sqlc'), 'generate'])
+        self.assertEqual(checks['sql-schema']['process_status'], 'timed_out')
 
     def test_source_component_reaches_ui_without_running_db_harnesses(self):
         events, result = self.exercise_initial_preparation(component='source', stop_at='npm')
