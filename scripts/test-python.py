@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Shared Python CI gates; no empty suites or skipped required tests pass."""
 import argparse
+import asyncio
 import importlib.util
 import os
 from pathlib import Path
@@ -8,6 +9,7 @@ import re
 import signal
 import subprocess
 import sys
+import tempfile
 import unittest
 import uuid
 
@@ -77,9 +79,80 @@ def regression_files():
 
 
 def run_regressions(timeout):
-    for name in regression_files():
-        print('Running Python regression: ' + name, flush=True)
-        run_process([sys.executable, '-B', str(Path(__file__).resolve()), 'unit', str(ROOT / name)], timeout)
+    files = regression_files()
+
+    async def stop(process):
+        # Match run_process, including descendants that outlive their leader.
+        for sig in (signal.SIGTERM, signal.SIGKILL):
+            try: os.killpg(process.pid, sig)
+            except ProcessLookupError: break
+            if sig == signal.SIGTERM:
+                try: await asyncio.wait_for(process.wait(), timeout=2)
+                except asyncio.TimeoutError: pass
+        await asyncio.wait_for(process.wait(), timeout=5)
+
+    async def suite(name, slots):
+        async with slots:
+            print('Running Python regression: ' + name, flush=True)
+            process, timed_out, code = None, False, 1
+            # Private output stays grouped by suite instead of interleaving.
+            with tempfile.TemporaryFile(mode='w+t') as output:
+                try:
+                    process = await asyncio.create_subprocess_exec(
+                        sys.executable, '-B', str(Path(__file__).resolve()), 'unit', str(ROOT / name),
+                        stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.STDOUT,
+                        start_new_session=True)
+                    try: code = await asyncio.wait_for(process.wait(), timeout=timeout)
+                    except asyncio.TimeoutError: timed_out, code = True, 124
+                except OSError:
+                    output.write('FAIL: Python regression could not start\n')
+                finally:
+                    if process is not None: await stop(process)
+                output.seek(0)
+                return code, timed_out, output.read()
+
+    async def execute():
+        loop, current = asyncio.get_running_loop(), asyncio.current_task()
+        previous = {sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM)}
+        interrupted_by = None
+
+        def cancel(signum):
+            nonlocal interrupted_by
+            if interrupted_by is None:
+                interrupted_by = signum
+                current.cancel()
+
+        for sig in previous: loop.add_signal_handler(sig, cancel, sig)
+        slots = asyncio.Semaphore(2)
+        tasks = [asyncio.create_task(suite(name, slots)) for name in files]
+        try:
+            # Failed results are data: finish every selected suite once.
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            for result in results:
+                if isinstance(result, BaseException): raise result
+            return results
+        except asyncio.CancelledError:
+            if interrupted_by is not None: raise Interrupted(interrupted_by) from None
+            raise
+        finally:
+            for task in tasks:
+                if not task.done(): task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            for sig, handler in previous.items():
+                loop.remove_signal_handler(sig)
+                signal.signal(sig, handler)
+
+    results = asyncio.run(execute())
+    for name, (code, timed_out, output) in zip(files, results):
+        print(output, end='', flush=True)
+        if timed_out:
+            print('FAIL: Python regression timed out: ' + name, file=sys.stderr, flush=True)
+        elif code:
+            print('FAIL: Python regression exited ' + str(code) + ': ' + name, file=sys.stderr, flush=True)
+    for name, (code, timed_out, _) in zip(files, results):
+        command = [sys.executable, '-B', str(Path(__file__).resolve()), 'unit', str(ROOT / name)]
+        if timed_out: raise subprocess.TimeoutExpired(command, timeout)
+        if code: raise subprocess.CalledProcessError(code, command)
     print('PASS_PYTHON_REGRESSION', flush=True)
 
 
