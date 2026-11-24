@@ -4,7 +4,7 @@
   "inputs": {
     "go.mod": "549dd8506499d35345154df2116a00a656933d819388f9c5a65f92aff7d1fc81",
     "go.sum": "657d707c4f1a6b5f71a9a59334989b297c1c9ac0f6bf59aaf87730f6b0471ae1",
-    "web/package-lock.json": "71a1562d2b5aa047673dc8ad572af98077f874af49f2f882febe7dbda7fd8849",
+    "web/package-lock.json": "43366162badc74e36a298a9a05a576dc7a2fd2949a2f8d428b8455bdb05d7738",
     "sensors/images.lock": "5db9be5a25b2270f17c2a17477d423c69328b1ab1e291d450b417b911e7d6b64"
   },
   "notices": [
@@ -269,10 +269,10 @@
     },
     {
       "component": "vite",
-      "version": "8.3.4",
-      "source": "https://www.npmjs.com/package/vite/v/8.3.4",
+      "version": "8.3.7",
+      "source": "https://www.npmjs.com/package/vite/v/8.3.7",
       "path": "third_party/licenses/npm/vite-LICENSE.md",
-      "sha256": "a47172e44a86a7e2cd1c16282341f7726ec60caafe3a6166fe3e0602005b6fa6"
+      "sha256": "a22152baa1aef74402443008e767e7c689a524c0909d19b0431d97f5ab066a13"
     },
     {
       "component": "github.com/moby/moby/api",
