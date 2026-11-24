@@ -28,6 +28,13 @@ because source tests do not need Chromium. After Go unit/vet, the pinned SQL
 compiler prepares alongside UI tests with its existing `-p=1` and `GOMAXPROCS=1`.
 Both results are required before the UI build and source generators; a failed
 compiler process, UI process, or missing/invalid UI report remains a failure.
+Python regression files run in separate processes, at most two at a time. The
+same complete inventory runs exactly once, including remaining files after an
+ordinary failure or timeout. Each retains its existing per-file deadline and
+rejects skipped or empty tests. Private output is grouped by file; every failed
+file is reported and any failure prevents the completion banner. Cancellation
+stops active groups and descendants before returning and starts no queued file.
+Standalone `unit` and isolated engine-image verification retain their behavior.
 The browser component prepares locked npm dependencies, Chromium's headless shell
 and system libraries while the existing E2E harness starts its one owned
 PostgreSQL stack, creates roles and migrates databases. Web preparation retains
