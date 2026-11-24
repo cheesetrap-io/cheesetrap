@@ -169,7 +169,10 @@ Documentation-only and cancelled runs retain their individual timings and costs
 but are explicitly excluded from normal full-PR quantiles. Supply every normal PR
 in the chosen window, including failures; the tool cannot detect omitted input PRs.
 It groups results by a fingerprint of workflow, tool/image locks, harness scripts,
-coverage inventory and the bounded memory fixture. Application and regression-test
+coverage inventory, the bounded memory fixture, Gitleaks policies and npm audit
+exceptions. Each policy file contributes its Git blob when present, so historical
+runs from before its introduction remain measurable. Recollect all samples with
+the same timing tool version when comparing fingerprints. Application and regression-test
 code may differ within a group. This fingerprint separates CI procedures, not
 identical workloads or runner hosts.
 

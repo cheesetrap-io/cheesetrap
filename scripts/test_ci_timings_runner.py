@@ -164,6 +164,16 @@ class CITimingTests(unittest.TestCase):
                     dict(tree, tree=tree['tree'] + tree['tree'][:1])):
             with self.subTest(bad=bad), self.assertRaises(ValueError): M.configuration_id(bad)
 
+    def test_security_policy_changes_split_timing_groups_including_historical_absence(self):
+        tree = dict(truncated=False, tree=[dict(path=p, type='blob', mode='100644', sha=SHA) for p in M.CONFIG_FILES])
+        historical = M.configuration_id(tree)
+        for path in ('web/npm-audit-exceptions.json', '.gitleaks.toml', '.gitleaksignore'):
+            with self.subTest(path=path):
+                policy = dict(path=path, type='blob', mode='100644', sha='2' * 40)
+                previous = M.configuration_id(dict(tree, tree=[*tree['tree'], policy]))
+                updated = M.configuration_id(dict(tree, tree=[*tree['tree'], dict(policy, sha='3' * 40)]))
+                self.assertEqual(len({historical, previous, updated}), 3)
+
     def test_workflow_inventory_is_bound_to_immutable_blob_and_supported_literal_matrix(self):
         parse = getattr(M, 'workflow_shards', None)
         self.assertTrue(callable(parse), 'native inventory must come from the exact run workflow blob')

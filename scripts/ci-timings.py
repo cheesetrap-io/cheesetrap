@@ -28,6 +28,7 @@ CONFIG_FILES = ('.github/workflows/ci.yml', '.github/merge-queue.ruleset.json', 
     'scripts/test-integration.py', 'scripts/test-e2e.py', 'scripts/test-e2e.sh',
     'scripts/prepare-ci-web.sh', 'scripts/ci-scope.py', 'scripts/test-python.py',
     'scripts/release-check.py', 'scripts/release-check.sh', 'scripts/testpostgres/main.go')
+SECURITY_POLICY_FILES = ('.gitleaks.toml', '.gitleaksignore', 'web/npm-audit-exceptions.json')
 
 
 def require(value, message):
@@ -151,11 +152,12 @@ def summarize(records):
 def configuration_id(tree):
     require(tree.get('truncated') is False, 'configuration tree is incomplete')
     selected = {}
+    tracked = set(CONFIG_FILES) | set(SECURITY_POLICY_FILES)
     for entry in tree.get('tree', []):
         path = entry.get('path', '')
         name = PurePosixPath(path).name
         procedure = path.startswith('scripts/') and name != 'ci-timings.py' and not name.startswith('test_') and not name.endswith('_test.go')
-        if entry.get('type') == 'tree' or not (path in CONFIG_FILES or procedure):
+        if entry.get('type') == 'tree' or not (path in tracked or procedure):
             continue
         require(path not in selected and entry.get('type') == 'blob' and entry.get('mode') in ('100644', '100755') and
                 bool(re.fullmatch('[a-f0-9]{40}', entry.get('sha', ''))), 'invalid configuration entry')
