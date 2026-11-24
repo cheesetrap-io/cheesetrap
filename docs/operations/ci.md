@@ -25,7 +25,8 @@ The jobs exchange status results, never private evidence artifacts.
 The source component prepares locked npm dependencies alongside Python regressions,
 joining both before Go tests. It uses `prepare-ci-web.sh --dependencies-only`
 because source tests do not need Chromium. After Go unit/vet, the pinned SQL
-compiler prepares alongside UI tests with its existing `-p=1` and `GOMAXPROCS=1`.
+compiler prepares alongside UI tests. The CI source job downloads the Linux AMD64
+release, checks its locked SHA-256 and version, then uses that binary for SQL generation.
 Both results are required before the UI build and source generators; a failed
 compiler process, UI process, or missing/invalid UI report remains a failure.
 Python regression files run in separate processes, at most two at a time. The

@@ -136,7 +136,7 @@ jobs:
           go mod verify
       - name: Run source and generated-code component
         if: ${{ github.event_name != 'pull_request' || steps.scope.outputs.scope != 'docs' }}
-        run: scripts/test-acceptance.sh --automated-only --prepare-web --component source
+        run: scripts/test-acceptance.sh --automated-only --prepare-web --component source --release-sqlc
       - name: Check current source component result
         if: ${{ github.event_name != 'pull_request' || steps.scope.outputs.scope != 'docs' }}
         run: |

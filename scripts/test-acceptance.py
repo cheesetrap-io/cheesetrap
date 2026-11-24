@@ -666,10 +666,13 @@ def main():
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument('--linux-evidence', type=Path)
     mode.add_argument('--automated-only', action='store_true', help='CI checks only; never asserts full Linux acceptance')
+    parser.add_argument('--release-sqlc', action='store_true', help='use the checksum-pinned Linux AMD64 sqlc release for the source component')
     parser.add_argument('--prepare-web', action='store_true', help='prepare locked web dependencies and Chromium where needed (CI only)')
     parser.add_argument('--component', choices=('source', 'browser', 'integration'), help='one complementary CI component; never complete acceptance')
     parser.add_argument('--integration-shard', choices=INTEGRATION_SHARDS, help='one fixed integration shard; complete CI requires every shard')
     args = parser.parse_args()
+    if args.release_sqlc and args.component != 'source':
+        parser.error('--release-sqlc requires the source component')
     if args.prepare_web and not args.automated_only:
         parser.error('--prepare-web requires --automated-only')
     if args.component and not args.automated_only:
@@ -816,8 +819,13 @@ def main():
         if args.component == 'source':
             # Preparing the pinned SQL tool does not generate source. Join it
             # with UI tests before any build or generator can change inputs.
-            sqlc = json.loads((ROOT / 'deploy/toolchain.lock.json').read_text())['sqlc']
-            sql_prepare = record_for('sql-prepare', ['go', 'run', '-p=1', 'github.com/sqlc-dev/sqlc/cmd/sqlc@v' + sqlc, 'version'])
+            toolchain = json.loads((ROOT / 'deploy/toolchain.lock.json').read_text())
+            sqlc = toolchain['sqlc']
+            if args.release_sqlc:
+                prepare = ['./scripts/prepare-release-sqlc.sh', str(out), sqlc, toolchain['sqlc_linux_amd64_sha256']]
+            else:
+                prepare = ['go', 'run', '-p=1', 'github.com/sqlc-dev/sqlc/cmd/sqlc@v' + sqlc, 'version']
+            sql_prepare = record_for('sql-prepare', prepare)
             ui = record_for('ui', ui_command, ROOT / 'web', report=ui_json)
             try:
                 run_independent([[ui], [sql_prepare]], env=env)
@@ -835,7 +843,7 @@ def main():
         run('api-schema', ['go', 'run', './cmd/cheesetrap', 'api-schema', '--out', 'api/openapi.json'])
         run('api-types', ['npm', 'run', 'generate:api'], ROOT / 'web')
         run('api-contract', ['npm', 'run', 'test:api'], ROOT / 'web')
-        run('sql-schema', ['./scripts/generate-sql.sh'])
+        run('sql-schema', [str(out / 'sqlc'), 'generate'] if args.release_sqlc else ['./scripts/generate-sql.sh'])
         after = generated_snapshot()
         changed = sorted(path for path in before.keys() | after.keys() if before.get(path) != after.get(path))
         commands.append({'name': 'generated-clean', 'status': 'FAIL' if changed else 'PASS', 'changed': changed})

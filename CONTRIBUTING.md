@@ -41,12 +41,12 @@ and dependency checks still run. Any code, configuration, lockfile, unusual path
 unknown comparison selects all checks. The enforced merge queue always runs the
 complete suite before merging, including for documentation-only PRs.
 
-CI runs source (`--automated-only --prepare-web --component source`), browser
+CI runs source (`--automated-only --prepare-web --component source --release-sqlc`), browser
 (`--automated-only --prepare-web --component browser`), and complete Go integration
 (`--automated-only --component integration`) components on separate runners.
 Source checks overlap locked npm preparation with Python regressions, then run Go
-unit/vet. Pinned SQL compiler preparation overlaps UI tests, keeping its existing
-single-CPU Go settings. Both finish before UI build, SQL/OpenAPI generation and
+unit/vet. CI verifies the pinned Linux AMD64 SQL compiler download alongside UI tests.
+Both finish before UI build, SQL/OpenAPI generation and
 drift checks. Browser installs the Chromium headless shell and required OS
 libraries while its existing E2E harness prepares one owned test database stack.
 A fresh private status releases UI build and every E2E/browser test only after
