@@ -121,11 +121,26 @@ elif a[0] == 'rm':
         self.assertFalse(any(c[0] == 'create' for c in self.calls()))
 
     def test_failure_modes_never_claim_pass_and_cleanup(self):
-        for mode in ['exit', 'schema', 'oom', 'cleanup', 'timeout', 'writable_rootfs']:
+        cases = (
+            ('exit', 'default_help', 'command_exit'),
+            ('schema', 'schema', 'schema_mismatch'),
+            ('oom', 'default_help', 'container_state'),
+            ('cleanup', 'default_help', 'cleanup_failed'),
+            ('timeout', 'default_help', 'timeout'),
+            ('writable_rootfs', 'default_help', 'readonly_rootfs'),
+        )
+        for mode, case, reason in cases:
             with self.subTest(mode=mode):
                 (self.root / 'calls').unlink(missing_ok=True)
                 result = self.invoke(mode, '--timeout', '0.2')
-                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(result.returncode, 124 if mode == 'timeout' else 1, result.stderr)
+                diagnostics = [line.split() for line in result.stderr.splitlines()
+                               if line.startswith('IMAGE_FAILURE ')]
+                self.assertEqual(len(diagnostics), 1, result.stderr)
+                self.assertIn('case=' + case, diagnostics[0])
+                self.assertIn('reason=' + reason, diagnostics[0])
+                if mode == 'oom':
+                    self.assertIn('oom=true', diagnostics[0])
                 self.assertNotIn('PASS_MAIN_IMAGE_SMOKE', result.stdout)
                 calls = self.calls()
                 created = [c[c.index('--name') + 1] for c in calls if c[0] == 'create']
