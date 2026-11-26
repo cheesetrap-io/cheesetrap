@@ -187,8 +187,36 @@ describe("Settings", () => {
     await screen.findByLabelText(label);
     fireEvent.change(screen.getByLabelText(label), { target: { value } });
     save();
-    expect(screen.getByRole("alert")).toBeInTheDocument();
+    const field = screen.getByLabelText(label);
+    expect(field).toHaveAttribute("aria-invalid", "true");
+    expect(field).toHaveFocus();
+    expect(field).toHaveAccessibleDescription(
+      expect.stringContaining(screen.getByRole("alert").textContent!),
+    );
     expect(network).toHaveBeenCalledOnce();
+  });
+  it("clears a field's invalid state once its value is corrected", async () => {
+    render(<Settings client={new ApiClient(fetcher(() => json(sample)))} />);
+    const field = await screen.findByLabelText("초안 집계 주기 (일)");
+    fireEvent.change(field, { target: { value: "32" } });
+    save();
+    expect(field).toHaveAttribute("aria-invalid", "true");
+    fireEvent.change(field, { target: { value: "7" } });
+    expect(field).toHaveAttribute("aria-invalid", "false");
+    expect(screen.getByLabelText("Reply-To")).toHaveAttribute("aria-invalid", "false");
+  });
+  it("describes numeric fields with their allowed range", async () => {
+    render(<Settings client={new ApiClient(fetcher(() => json(sample)))} />);
+    expect(
+      await screen.findByLabelText("초안 집계 주기 (일)"),
+    ).toHaveAccessibleDescription("1–31");
+  });
+  it("shows loading without announcing it", async () => {
+    const pending = deferred<Response>();
+    render(<Settings client={new ApiClient(fetcher(() => pending.promise))} />);
+    expect(screen.getByText("설정을 불러오는 중…")).toBeInTheDocument();
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+    await act(async () => pending.resolve(json(sample)));
   });
   it("shows a retryable read failure", async () => {
     let fail = true;

@@ -35,7 +35,8 @@ describe('EventList', () => {
   it('shows loading, then an honest empty state', async () => {
     const pending = deferred<Response>();
     render(<EventList client={new ApiClient(fetcher(() => pending.promise))} />);
-    expect(screen.getByRole('status')).toHaveTextContent('이벤트를 불러오는 중');
+    expect(screen.getByText('이벤트를 불러오는 중…')).toBeInTheDocument();
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
     await act(async () => pending.resolve(page([])));
     expect(await screen.findByText('조건에 맞는 이벤트가 없습니다.')).toBeInTheDocument();
     expect(screen.queryByRole('table')).not.toBeInTheDocument();
@@ -155,6 +156,7 @@ describe('EventList', () => {
     fireEvent.change(screen.getByLabelText('수집 종료 (제외)'), { target: { value: '2026-10-18T00:00' } });
     fireEvent.click(screen.getByRole('button', { name: '필터 적용' }));
     expect(screen.getByRole('alert')).toHaveTextContent('수집 시작 시각은 종료 시각보다 빨라야 합니다.');
+    expect(screen.getByLabelText('수집 시작 (포함)')).toHaveFocus();
     expect(network).toHaveBeenCalledOnce();
   });
   it('distinguishes detail failure from an empty list and restores focus on close', async () => {
