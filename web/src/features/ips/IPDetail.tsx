@@ -51,7 +51,7 @@ export function IPDetail({ client, ip }: { client: ApiClient; ip: string }) {
         </a>
       </div>
       {state.kind === "loading" ? (
-        <p role="status">IP 정보를 불러오는 중…</p>
+        <p>IP 정보를 불러오는 중…</p>
       ) : state.kind === "error" ? (
         <p className="error" role="alert">
           {state.message}

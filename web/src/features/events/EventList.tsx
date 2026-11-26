@@ -111,6 +111,7 @@ export function EventList({ client, summary, onRefresh, refreshing = false }: {
   const [filterError, setFilterError] = useState("");
   const [ipError, setIPError] = useState("");
   const ipInput = useRef<HTMLInputElement | null>(null);
+  const sinceInput = useRef<HTMLInputElement | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   useEffect(() => {
     const abort = new AbortController();
@@ -184,6 +185,7 @@ export function EventList({ client, summary, onRefresh, refreshing = false }: {
       setFilterError(
         "수집 시작 시각은 종료 시각보다 빨라야 합니다. 시간 범위를 확인하세요.",
       );
+      sinceInput.current?.focus();
       return;
     }
     setFilterError("");
@@ -302,6 +304,7 @@ export function EventList({ client, summary, onRefresh, refreshing = false }: {
           <label>
             수집 시작 (포함)
             <input
+              ref={sinceInput}
               type="datetime-local"
               value={draft.since}
               onChange={(e) => change("since", e.target.value)}
@@ -343,7 +346,7 @@ export function EventList({ client, summary, onRefresh, refreshing = false }: {
       <div className="event-workbench">
         <div className="event-results" aria-busy={loading}>
           {state.kind === "loading" && (
-            <div className="result-message" role="status">
+            <div className="result-message">
               이벤트를 불러오는 중…
             </div>
           )}

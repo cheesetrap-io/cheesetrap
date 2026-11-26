@@ -25,7 +25,7 @@ export function CollectionStatus({ client, dashboard = false, refreshRevision, o
   }, [client, revision, refreshRevision, onLoadingChange]);
   return <section className={`collection-status${dashboard ? " dashboard-status" : ""}`} aria-labelledby="collection-title" aria-busy={loading}>
     <div className={dashboard ? "sr-only" : "section-heading compact"}><h2 id="collection-title">{dashboard ? "운영 현황" : "수집 상태"}</h2>{refreshRevision === undefined && <button className="quiet" aria-label="수집 상태 새로고침" onClick={() => setRevision((n) => n + 1)} disabled={loading}>새로고침</button>}</div>
-    {state.kind === 'loading' && <p className="muted" role="status">수집 상태를 불러오는 중…</p>}
+    {state.kind === 'loading' && <p className="muted">수집 상태를 불러오는 중…</p>}
     {state.kind === 'error' && <p role="alert" className="error">{state.message}</p>}
     {state.kind === 'ready' && refreshError && <p role="alert" className="error">{refreshError} 이전 조회 결과를 표시합니다.</p>}
     {state.kind === 'ready' && <>

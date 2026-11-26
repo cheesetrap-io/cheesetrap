@@ -123,7 +123,7 @@ export function ReportList({ client }: { client: ApiClient }) {
         </div>
       </form>
       {state.kind === "loading" ? (
-        <p role="status">신고를 불러오는 중…</p>
+        <p>신고를 불러오는 중…</p>
       ) : state.kind === "error" ? (
         <p role="alert" className="error">
           {state.message}

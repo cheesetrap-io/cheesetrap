@@ -129,7 +129,7 @@ export function App({ client }: { client: ApiClient }) {
   if (session.kind === "checking")
     return (
       <main className="session-page">
-        <p role="status">세션을 확인하는 중…</p>
+        <p>세션을 확인하는 중…</p>
       </main>
     );
   if (session.kind === "error")
