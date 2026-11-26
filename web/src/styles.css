@@ -481,6 +481,7 @@ p, label, h1, h2, h3 { word-break: keep-all; overflow-wrap: anywhere; }
 .settings-form { margin-block: var(--space-lg); }
 .settings-form > p, .settings-help { max-width: 75ch; font-size: var(--text-sm); color: var(--color-muted); }
 .settings-fields, .settings-schedules { display: grid; grid-template-columns: minmax(0,1fr); gap: var(--space-lg); }
+.settings-field { display: grid; gap: var(--space-xs); min-width: 0; color: var(--color-muted); font-size: var(--text-sm); }
 .settings-group > .settings-fields { margin-top: var(--space-md); }
 .settings-group > p + p { margin-top: var(--space-sm); }
 .settings-schedules { align-items: stretch; margin-bottom: var(--space-lg); }

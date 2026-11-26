@@ -178,7 +178,7 @@ function Review({ client, id }: { client: ApiClient; id: string }) {
           동일 요청 재시도
         </button>
       )}
-      {data.kind === "ready" && loading && <p role="status">최신 신고 상태를 불러오는 중…</p>}
+      {data.kind === "ready" && loading && <p>최신 신고 상태를 불러오는 중…</p>}
       {data.kind === "ready" && loadError && (
         <p role="alert" className="error">
           {loadError} 현재 표시된 내용은 이전 정보입니다. 신고 상태를 새로고침한 후 처리하세요.
@@ -209,7 +209,7 @@ function Review({ client, id }: { client: ApiClient; id: string }) {
           {loading && data.kind === "ready" ? "신고 상태 불러오는 중…" : "신고 상태 새로고침"}
         </button>
       </div>
-      {data.kind === "loading" && <p role="status">신고를 불러오는 중…</p>}
+      {data.kind === "loading" && <p>신고를 불러오는 중…</p>}
       {data.kind === "error" && (
         <p role="alert" className="error">
           {data.message}
@@ -301,7 +301,7 @@ function Review({ client, id }: { client: ApiClient; id: string }) {
                   <p className="muted">선택할 연락처 후보가 없습니다.</p>
                 )}
                 {mutation === "busy" && (
-                  <p role="status">변경을 처리하는 중…</p>
+                  <p>변경을 처리하는 중…</p>
                 )}
                 <details className="review-disclosure contact-lookup">
                   <summary>연락처 후보 다시 찾기</summary>
@@ -351,7 +351,7 @@ function Historical({
   return state.kind === "ready" ? (
     <RevisionContent client={client} value={state.data} />
   ) : state.kind === "loading" ? (
-    <p role="status">개정을 불러오는 중…</p>
+    <p>개정을 불러오는 중…</p>
   ) : (
     <div>
       <p role="alert">{state.message}</p>
@@ -383,7 +383,7 @@ function RevisionHistory({
     <section className="review-section">
       <h2>개정 이력</h2>
       {state.kind === "loading" ? (
-        <p role="status">이력을 불러오는 중…</p>
+        <p>이력을 불러오는 중…</p>
       ) : state.kind === "error" ? (
         <>
           <p role="alert">{state.message}</p>
@@ -510,7 +510,7 @@ function Evidence({
     <section className="review-section">
       <h2>증거</h2>
       {state.kind === "loading" ? (
-        <p role="status">증거를 불러오는 중…</p>
+        <p>증거를 불러오는 중…</p>
       ) : state.kind === "error" ? (
         <>
           <p role="alert">{state.message}</p>
@@ -586,7 +586,7 @@ function Rules({
     <section className="review-section">
       <h2>탐지 규칙</h2>
       {state.kind === "loading" ? (
-        <p role="status">규칙을 불러오는 중…</p>
+        <p>규칙을 불러오는 중…</p>
       ) : state.kind === "error" ? (
         <>
           <p role="alert">{state.message}</p>

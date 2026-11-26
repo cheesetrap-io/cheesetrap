@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import { useEffect, useId, useRef, useState, type FormEvent } from "react";
 import {
   ApiClient,
   ApiError,
@@ -37,31 +37,40 @@ const draftOf = (s: Snapshot): Draft => ({
   web_repeat_threshold: String(s.rules.web_repeat_threshold),
   web_distinct_path_threshold: String(s.rules.web_distinct_path_threshold),
 });
-function valid(d: Draft) {
-  const integer = (value: string, min: number, max: number) =>
-    /^\d+$/.test(value) && Number(value) >= min && Number(value) <= max;
-  if (
-    d.reply_to.length > 254 ||
-    (d.reply_to !== "" && !/^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(d.reply_to))
-  )
-    return false;
-  if (!d.timezone || d.timezone.length > 100 || d.timezone === "Local")
-    return false;
+const fields: [keyof Draft, string, number?, number?][] = [
+  ["raw_days", "원본 보관 (일)", 1, 365],
+  ["raw_bytes", "원본 한도 (bytes/센서)", 33554432, 1099511627776],
+  ["event_days", "이벤트·판정 보관 (일)", 1, 3650],
+  ["history_days", "종료 이력 보관 (일)", 1, 3650],
+  ["job_days", "완료 작업 보관 (일)", 1, 365],
+  ["reply_to", "Reply-To"],
+  ["timezone", "시간대"],
+  ["period_days", "초안 집계 주기 (일)", 1, 31],
+  ["ssh_repeat_threshold", "SSH 반복 임계값", 2, 10000],
+  ["web_repeat_threshold", "웹 반복 임계값", 2, 10000],
+  ["web_distinct_path_threshold", "웹 경로 수 임계값", 1, 5],
+];
+function validTimeZone(value: string) {
+  if (!value || value.length > 100 || value === "Local") return false;
   try {
-    new Intl.DateTimeFormat("en", { timeZone: d.timezone });
+    new Intl.DateTimeFormat("en", { timeZone: value });
+    return true;
   } catch {
     return false;
   }
-  return (
-    integer(d.raw_days, 1, 365) &&
-    /^[1-9][0-9]*$/.test(d.raw_bytes) && integer(d.raw_bytes, 33554432, 1099511627776) &&
-    integer(d.event_days, 1, 3650) && integer(d.history_days, 1, 3650) && integer(d.job_days, 1, 365) &&
-    integer(d.period_days, 1, 31) &&
-    integer(d.ssh_repeat_threshold, 2, 10000) &&
-    integer(d.web_repeat_threshold, 2, 10000) &&
-    integer(d.web_distinct_path_threshold, 1, 5) &&
-    Number(d.web_repeat_threshold) >= Number(d.web_distinct_path_threshold)
-  );
+}
+function invalidFields(d: Draft): (keyof Draft)[] {
+  return fields
+    .filter(([key, , min = 0, max = 0]) => {
+      const value = d[key];
+      if (key === "reply_to")
+        return value.length > 254 || (value !== "" && !/^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(value));
+      if (key === "timezone") return !validTimeZone(value);
+      if (key === "raw_bytes" && !/^[1-9][0-9]*$/.test(value)) return true;
+      if (key === "web_repeat_threshold" && Number(value) < Number(d.web_distinct_path_threshold)) return true;
+      return !/^\d+$/.test(value) || Number(value) < min || Number(value) > max;
+    })
+    .map(([key]) => key);
 }
 function Schedule({
   title,
@@ -108,6 +117,8 @@ export function Settings({ client }: { client: ApiClient }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  const [invalid, setInvalid] = useState<(keyof Draft)[]>([]);
+  const ids = useId();
   const request = useRef(0);
   const controller = useRef<AbortController | null>(null);
   const frozen = useRef<{ body: Patch; key: string } | null>(null);
@@ -203,7 +214,11 @@ export function Settings({ client }: { client: ApiClient }) {
   function submit(event: FormEvent) {
     event.preventDefault();
     if (modeRef.current !== "idle" || !draft || !snapshot) return;
-    if (!valid(draft)) {
+    const bad = invalidFields(draft);
+    setInvalid(bad);
+    if (bad.length) {
+      const form = event.currentTarget as HTMLFormElement;
+      (form.elements.namedItem(bad[0]) as HTMLInputElement).focus();
       setError(
         "입력값을 확인하세요. 유효한 이메일·시간대와 허용 범위의 정수가 필요하며 웹 반복 임계값은 경로 수 이상이어야 합니다.",
       );
@@ -228,33 +243,15 @@ export function Settings({ client }: { client: ApiClient }) {
     };
     void mutate();
   }
-  const fields: [
-    keyof Draft,
-    string,
-    number?,
-    number?,
-  ][] = [
-    ["raw_days", "원본 보관 (일)", 1, 365],
-    ["raw_bytes", "원본 한도 (bytes/센서)", 33554432, 1099511627776],
-    ["event_days", "이벤트·판정 보관 (일)", 1, 3650],
-    ["history_days", "종료 이력 보관 (일)", 1, 3650],
-    ["job_days", "완료 작업 보관 (일)", 1, 365],
-    ["reply_to", "Reply-To"],
-    ["timezone", "시간대"],
-    ["period_days", "초안 집계 주기 (일)", 1, 31],
-    ["ssh_repeat_threshold", "SSH 반복 임계값", 2, 10000],
-    ["web_repeat_threshold", "웹 반복 임계값", 2, 10000],
-    ["web_distinct_path_threshold", "웹 경로 수 임계값", 1, 5],
-  ];
   return (
     <section className="settings-page" aria-labelledby="settings-heading">
       <div className="section-heading">
         <div><p className="eyebrow">운영 정책</p><h1 id="settings-heading">설정</h1>
         <p className="muted">보관 정책·초안 집계 일정·탐지 임계값</p></div>
       </div>
-      {loading && <p role="status">설정을 불러오는 중…</p>}
+      {loading && <p>설정을 불러오는 중…</p>}
       {error && (
-        <p role="alert" className="error">
+        <p id={`${ids}-error`} role="alert" className="error">
           {error}
         </p>
       )}
@@ -303,11 +300,17 @@ export function Settings({ client }: { client: ApiClient }) {
               </div>}
               <div className="settings-fields">
               {fields.filter(([key]) => group.keys.includes(key)).map(([key, label, min, max]) => (
-                <label key={key}>
+                <div key={key} className="settings-field">
+                <label>
                   {label}
                   <input
-                    aria-label={label}
                     name={key}
+                    aria-invalid={invalid.includes(key)}
+                    aria-describedby={
+                      [min !== undefined && `${ids}-${key}-range`, invalid.includes(key) && `${ids}-error`]
+                        .filter(Boolean)
+                        .join(" ") || undefined
+                    }
                     autoComplete="off"
                     spellCheck={false}
                     value={draft[key]}
@@ -323,16 +326,19 @@ export function Settings({ client }: { client: ApiClient }) {
                           ? 100
                           : undefined
                     }
-                    onChange={(e) =>
-                      setDraft({ ...draft, [key]: e.target.value })
-                    }
+                    onChange={(e) => {
+                      const next = { ...draft, [key]: e.target.value };
+                      setDraft(next);
+                      if (invalid.length) setInvalid(invalidFields(next).filter((k) => invalid.includes(k)));
+                    }}
                   />
-                  {min !== undefined && (
-                    <span>
-                      {min}–{max}
-                    </span>
-                  )}
                 </label>
+                {min !== undefined && (
+                  <span id={`${ids}-${key}-range`}>
+                    {min}–{max}
+                  </span>
+                )}
+                </div>
               ))}
             </div></fieldset>)}
             <div className="filter-bottom">

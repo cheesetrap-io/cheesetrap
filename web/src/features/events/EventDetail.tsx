@@ -14,7 +14,7 @@ export function EventDetail({ client, id }: { client: ApiClient; id: string }) {
       .catch((error: unknown) => { if (active && !isCancelled(error)) setState({ kind: 'error', message: error instanceof ApiError && error.status === 404 ? '이벤트를 찾을 수 없습니다. 목록을 새로고침하세요.' : errorMessage(error, '이벤트 상세를 불러오지 못했습니다. 다시 시도하세요.') }); });
     return () => { active = false; abort.abort(); };
   }, [client, id, attempt]);
-  if (state.kind === 'loading') return <section className="inspector"><p role="status">상세를 불러오는 중…</p></section>;
+  if (state.kind === 'loading') return <section className="inspector"><p>상세를 불러오는 중…</p></section>;
   if (state.kind === 'error') return <section className="inspector"><h2>이벤트 상세</h2><p role="alert" className="error">{state.message}</p><div className="inline-actions"><button onClick={() => setAttempt((n) => n + 1)}>다시 시도</button></div></section>;
   const event = state.event;
   return <aside className="inspector" aria-label="이벤트 상세">
